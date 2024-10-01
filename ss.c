@@ -5,8 +5,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include <future>
-
 #include <raylib.h>
 
 #define Font XFont
@@ -39,15 +37,9 @@ typedef struct { float w, h, x, y; } whxy_t;
 	usize x = (usize) whxy.x; \
 	usize y = (usize) whxy.y;
 
-void init_ocr(void);
-void deinit_ocr(void);
-void init_raylib(void);
-void deinit_raylib(void);
-
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 #define panic(...) do { \
 	eprintf(__VA_ARGS__); \
-	deinit_ocr(); \
 	deinit_raylib(); \
 	exit(1); \
 } while (0)
@@ -56,6 +48,8 @@ void deinit_raylib(void);
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+#define INLINE static inline
 
 #define CIRCLE_TEXTURE_FILE_PATH "CircleTexture.frag"
 
@@ -115,12 +109,8 @@ static Vector2 prev_cur_pos = {0};
 
 static bool raylib_initialized = false;
 
-static TessBaseAPI *ocr = NULL;
-
 static Display *xdisplay = NULL;
 static XWindowAttributes gwa = {0};
-
-static std::future<char *> text_fut = {};
 
 static Image screenshot = {0};
 static Image darker_screenshot = {0};
@@ -130,23 +120,7 @@ static Texture2D darker_screenshot_texture = {0};
 
 uint8_t *original_image_data = NULL;
 
-inline void init_ocr(void)
-{
-	ocr = new TessBaseAPI();
-	if (ocr->Init(NULL, "eng")) {
-		panic("could not initialize tesseract.\n");
-	}
-}
-
-inline void deinit_ocr(void)
-{
-	if (ocr != NULL) {
-		ocr->End();
-		delete ocr;
-	}
-}
-
-inline void init_raylib(i32 w, i32 h)
+INLINE void init_raylib(i32 w, i32 h)
 {
 	SetTargetFPS(144);
 	SetTraceLogLevel(LOG_NONE);
@@ -157,14 +131,17 @@ inline void init_raylib(i32 w, i32 h)
 	raylib_initialized = true;
 }
 
-inline void deinit_raylib(void)
+INLINE void deinit_raylib(void)
 {
 	if (raylib_initialized) {
 		CloseWindow();
 	}
 }
 
-inline void fill_image(Image *image, int w, int h, int fmt, void *data)
+INLINE void fill_image(Image *image,
+															int w, int h,
+															int fmt,
+															void *data)
 {
 	image->width = (i32) w;
 	image->height = (i32) h;
@@ -218,29 +195,6 @@ void capture_screen(Window root, XWindowAttributes gwa)
 						 darker_data);
 }
 
-char *leptonica_read_image(const u8 *data)
-{
-	Pix *image = pixCreate(screenshot.width, screenshot.height, 4*8);
-	u32 *pix_data = pixGetData(image);
-	i32 wpl = pixGetWpl(image);
-
-	for (usize y = 0; y < (usize) screenshot.height; ++y) {
-		for (usize x = 0; x < (usize) screenshot.width; ++x) {
-			usize idx = (y*screenshot.width + x)*sizeof(RGB);
-			uint8_t r = data[idx++];
-			uint8_t g = data[idx++];
-			uint8_t b = data[idx];
-			u32 rgba = (r << 24) | (g << 16) | (b << 8) | 0xFF;
-			pix_data[y*wpl + x] = rgba;
-		}
-	}
-
-	ocr->SetImage(image);
-	char *text = ocr->GetUTF8Text();
-	pixDestroy(&image);
-	return text;
-}
-
 // Stolen from: <https://github.com/NSinecode/Raylib-Drawing-texture-in-circle/blob/master/CircleTextureDrawing.cpp>
 void DrawCollisionTextureCircle(Texture2D texture,
 																Vector2 pos,
@@ -272,7 +226,7 @@ void DrawCollisionTextureCircle(Texture2D texture,
 	UnloadShader(shader);
 }
 
-inline void stop_selection_mode(void)
+INLINE void stop_selection_mode(void)
 {
 	memset(&selection_start,
 				 SELECTION_UNINITIALIZED,
@@ -286,14 +240,14 @@ inline void stop_selection_mode(void)
 	preserve_selection_mode = false;
 }
 
-inline float clamp(float v, float min, float max)
+INLINE float clamp(float v, float min, float max)
 {
 	float ret = v < min ? min : v;
 	if (ret > max) ret = max;
 	return ret;
 }
 
-inline whxy_t get_selection_data(void)
+INLINE whxy_t get_selection_data(void)
 {
 	return (whxy_t) {
 		.w = fabsf(selection_end.x - selection_start.x),
@@ -303,7 +257,7 @@ inline whxy_t get_selection_data(void)
 	};
 }
 
-inline void save_fullscreen(char *file_path)
+INLINE void save_fullscreen(char *file_path)
 {
 	stbi_write_png(file_path,
 								 screenshot.width,
@@ -313,9 +267,9 @@ inline void save_fullscreen(char *file_path)
 								 sizeof(RGB)*screenshot.width);
 }
 
-inline void save_image_data(char *file_path,
-														uint8_t *data,
-														int w, int h)
+INLINE void save_image_data(char *file_path,
+																	 uint8_t *data,
+																	 int w, int h)
 {
 	stbi_write_png(file_path,
 								 w, h,
@@ -466,13 +420,13 @@ void draw_selection(void)
 		DrawTexturePro(screenshot_texture,
 									 src_rect,
 									 selection,
-									 {0},
+									 (Vector2) {0},
 									 0,
 									 WHITE);
 	}
 }
 
-inline void save_original_image_data(void)
+INLINE void save_original_image_data(void)
 {
 	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
 																					 screenshot.width*
@@ -485,8 +439,6 @@ inline void save_original_image_data(void)
 
 i32 main(void)
 {
-	init_ocr();
-
 	xdisplay = XOpenDisplay(NULL);
 	if (!xdisplay) {
 		panic("could not to open X display");
@@ -498,17 +450,13 @@ i32 main(void)
 	capture_screen(root, gwa);
 	save_original_image_data();
 
-	text_fut = std::async(std::launch::async,
-												leptonica_read_image,
-												(const uint8_t *) screenshot.data);
-
 	XCloseDisplay(xdisplay);
 	init_raylib(gwa.width, gwa.height);
 
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
 
-	cur_pos = {
+	cur_pos = (Vector2) {
 		.x = GetScreenWidth() / 2,
 		.y = GetScreenHeight() / 2,
 	};
@@ -545,12 +493,6 @@ i32 main(void)
 	UnloadImage(darker_screenshot);
 	UnloadTexture(screenshot_texture);
 	deinit_raylib();
-
-	char *text = text_fut.get();
-	printf("extracted text:\n%s", text);
-
-	free(text);
-	deinit_ocr();
 
 	return 0;
 }

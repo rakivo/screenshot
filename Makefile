@@ -1,6 +1,6 @@
 CC=cc
-CFLAGS=std=c++11 -O0 -g
-CLIBS=-lX11 -lraylib
+CFLAGS=-std=c11 -O0 -g
+CLIBS=-lm -lX11 -lraylib
 WFLAGS := -Wall -Wextra -Wpedantic
 
 export $(TESSDATA_PREFIX)

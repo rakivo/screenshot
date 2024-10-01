@@ -1,4 +1,5 @@
 ss
 *.png
 tesseract
+leptonica.c
 eng.traineddata
