@@ -259,8 +259,8 @@ INLINE void save_fullscreen(char *file_path)
 }
 
 INLINE void save_image_data(char *file_path,
-																	 uint8_t *data,
-																	 int w, int h)
+													  uint8_t *data,
+													  int w, int h)
 {
 	stbi_write_png(file_path,
 								 w, h,
@@ -354,13 +354,11 @@ void handle_input(void)
 			prev_cur_pos = mouse_pos;
 		}
 
-		const Vector2 delta = {
-			mouse_pos.x - prev_cur_pos.x,
-			mouse_pos.y - prev_cur_pos.y
-		};
+		const float dx = mouse_pos.x - prev_cur_pos.x;
+		const float dy = mouse_pos.y - prev_cur_pos.y;
 
-		image_pos.x += (delta.x*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
-		image_pos.y += (delta.y*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
+		image_pos.x += (dx*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
+		image_pos.y += (dy*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
 
 		prev_cur_pos = mouse_pos;
 	} else {
