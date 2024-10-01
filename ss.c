@@ -99,7 +99,7 @@ static bool pan_mode, alt_mode, selection_mode, preserve_selection_mode = false;
 #define SELECTION_UNINITIALIZED 0.0f
 static Vector2 selection_start, selection_end = {SELECTION_UNINITIALIZED, SELECTION_UNINITIALIZED};
 
-static Vector2 cur_pos, image_pos, prev_cur_pos = {0};
+static Vector2 cur_pos, image_pos, pan_cur_pos = {0};
 
 static bool raylib_initialized = false;
 
@@ -351,16 +351,16 @@ void handle_input(void)
 	if (IsKeyDown(KEY_SPACE)) {
 		if (!pan_mode) {
 			pan_mode = true;
-			prev_cur_pos = mouse_pos;
+			pan_cur_pos = mouse_pos;
 		}
 
-		const float dx = mouse_pos.x - prev_cur_pos.x;
-		const float dy = mouse_pos.y - prev_cur_pos.y;
+		const float dx = mouse_pos.x - pan_cur_pos.x;
+		const float dy = mouse_pos.y - pan_cur_pos.y;
 
 		image_pos.x += (dx*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
 		image_pos.y += (dy*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
 
-		prev_cur_pos = mouse_pos;
+		pan_cur_pos = mouse_pos;
 	} else {
 		pan_mode = false;
 	}
