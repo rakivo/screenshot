@@ -46,6 +46,9 @@ typedef struct { float w, h, x, y; } whxy_t;
 
 #define DEBUG 0
 
+#define center_x (GetScreenWidth() / 2)
+#define center_y (GetScreenHeight() / 2)
+
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -83,42 +86,30 @@ typedef struct { float w, h, x, y; } whxy_t;
 	X(screenshot); \
 	X(darker_screenshot);
 
+#define XTEXTURES \
+	X(screenshot_texture); \
+	X(darker_screenshot_texture);
+
 static float zoom = STARTING_ZOOM;
 
 static u32 radius = STARTING_RADIUS;
 
-static bool pan_mode = false;
-static bool alt_mode = false;
-static bool selection_mode = false;
-static bool preserve_selection_mode = false;
+static bool pan_mode, alt_mode, selection_mode, preserve_selection_mode = false;
 
 #define SELECTION_UNINITIALIZED 0.0f
-static Vector2 selection_start = {
-	SELECTION_UNINITIALIZED,
-	SELECTION_UNINITIALIZED
-};
+static Vector2 selection_start, selection_end = {SELECTION_UNINITIALIZED, SELECTION_UNINITIALIZED};
 
-static Vector2 selection_end = {
-	SELECTION_UNINITIALIZED,
-	SELECTION_UNINITIALIZED
-};
-
-static Vector2 cur_pos = {0};
-static Vector2 image_pos = {0};
-static Vector2 prev_cur_pos = {0};
+static Vector2 cur_pos, image_pos, prev_cur_pos = {0};
 
 static bool raylib_initialized = false;
 
 static Display *xdisplay = NULL;
 static XWindowAttributes gwa = {0};
 
-static Image screenshot = {0};
-static Image darker_screenshot = {0};
+static Image screenshot, darker_screenshot = {0};
+static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
-static Texture2D screenshot_texture = {0};
-static Texture2D darker_screenshot_texture = {0};
-
-uint8_t *original_image_data = NULL;
+static uint8_t *original_image_data = NULL;
 
 INLINE void init_raylib(i32 w, i32 h)
 {
@@ -157,16 +148,16 @@ void capture_screen(Window root, XWindowAttributes gwa)
 		panic("could not capture screen using `XGetImage`\n");
 	}
 
-	u32 w = ximage->width;
-	u32 h = ximage->height;
+	const u32 w = ximage->width;
+	const u32 h = ximage->height;
 
 	u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
 	u8 *darker_data = (u8 *) malloc(w*h*sizeof(RGB));
 
 	for (usize y = 0; y < h; y++) {
 		for (usize x = 0; x < w; x++) {
-			u32 p = XGetPixel(ximage, x, y);
-			usize idx = (y*w + x)*sizeof(RGB);
+			const u32 p = XGetPixel(ximage, x, y);
+			const usize idx = (y*w + x)*sizeof(RGB);
 
 			const u8 r = (p & ximage->red_mask)   >> 16;
 			const u8 g = (p & ximage->green_mask) >> 8;
@@ -280,6 +271,10 @@ INLINE void save_image_data(char *file_path,
 
 void handle_input(void)
 {
+	const float mouse_move = GetMouseWheelMove();
+	const Vector2 mouse_pos = GetMousePosition();
+
+	cur_pos = mouse_pos;
 	alt_mode = IsKeyDown(KEY_LEFT_ALT);
 
 	if (alt_mode || preserve_selection_mode) {
@@ -292,6 +287,11 @@ void handle_input(void)
 	if (IsKeyPressed(KEY_ESCAPE)) {
 		if (selection_mode) {
 			stop_selection_mode();
+		} else {
+			zoom = STARTING_ZOOM;
+			radius = STARTING_RADIUS;
+			image_pos = (Vector2) {0};
+			cur_pos = (Vector2) {center_x, center_y};
 		}
 	}
 
@@ -317,19 +317,18 @@ void handle_input(void)
 		}
 	}
 
-	const float mouse_move = GetMouseWheelMove();
-	const Vector2 mouse_pos = GetMousePosition();
-
-	cur_pos = mouse_pos;
-
 	if (selection_mode && !preserve_selection_mode) {
 		selection_end = cur_pos;
 	}
 
 	if (mouse_move != 0) {
 		if (IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
-			const float offset_ = -SCROLL_SPEED*mouse_move;
-			const float offset = offset_ <= 0 ? offset_*-RADIUS_ZOOM_OUT_FACTOR : offset_;
+			float offset = -SCROLL_SPEED*mouse_move;
+
+			if (offset <= 0) {
+				offset*=-RADIUS_ZOOM_OUT_FACTOR;
+			}
+
 			const float sine = sin(offset);
 			const float sens = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_SCROLL_SENSITIVITY : SCROLL_SENSITIVITY;
 			const float tradius = MIN(MIN(gwa.width, gwa.height), MAX(15.0, radius + sine*sens));
@@ -355,7 +354,7 @@ void handle_input(void)
 			prev_cur_pos = mouse_pos;
 		}
 
-		Vector2 delta = {
+		const Vector2 delta = {
 			mouse_pos.x - prev_cur_pos.x,
 			mouse_pos.y - prev_cur_pos.y
 		};
@@ -444,7 +443,7 @@ i32 main(void)
 		panic("could not to open X display");
 	}
 
-	Window root = DefaultRootWindow(xdisplay);
+	const Window root = DefaultRootWindow(xdisplay);
 	XGetWindowAttributes(xdisplay, root, &gwa);
 
 	capture_screen(root, gwa);
@@ -456,10 +455,7 @@ i32 main(void)
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
 
-	cur_pos = (Vector2) {
-		.x = GetScreenWidth() / 2,
-		.y = GetScreenHeight() / 2,
-	};
+	cur_pos = (Vector2) {center_x, center_y};
 
 	while (!WindowShouldClose()) {
 		handle_input();
@@ -489,9 +485,14 @@ i32 main(void)
 		EndDrawing();
 	}
 
-	UnloadImage(screenshot);
-	UnloadImage(darker_screenshot);
-	UnloadTexture(screenshot_texture);
+#define X UnloadImage
+	XSCREENSHOTS
+#undef X
+
+#define X UnloadTexture
+	XTEXTURES
+#undef X
+
 	deinit_raylib();
 
 	return 0;
