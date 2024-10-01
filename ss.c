@@ -305,7 +305,7 @@ void handle_input(void)
 
 			for (usize row = 0; row < h; row++) {
 				usize src_offset = ((y + row)*screenshot.width + x)*sizeof(RGB);
-				usize dst_offset = (row*w)*sizeof(RGB);
+				usize dst_offset = row*w*sizeof(RGB);
 				memcpy(data + dst_offset, original_image_data + src_offset, w*sizeof(RGB));
 			}
 
