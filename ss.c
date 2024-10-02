@@ -49,8 +49,6 @@ typedef u64 usize;
 
 #define INLINE static inline
 
-#define CIRCLE_TEXTURE_FILE_PATH "CircleTexture.frag"
-
 #define BACKGROUND_COLOR ((Color) {10, 10, 10, 255})
 
 #define WINDOW_FLAGS (FLAG_FULLSCREEN_MODE | FLAG_WINDOW_UNDECORATED | FLAG_WINDOW_TOPMOST)
@@ -88,6 +86,32 @@ typedef u64 usize;
 typedef struct { u8 r, g, b; } RGB;
 
 typedef struct { float w, h, x, y; } whxy_t;
+
+// Stolen from: <https://github.com/NSinecode/Raylib-Drawing-texture-in-circle/blob/master/CircleTexture.frag>
+const char* CIRCLE_SHADER = 
+"#version 330\n"
+"in vec2 fragTexCoord;\n"
+"in vec4 fragColor;\n"
+"uniform sampler2D texture0;\n"
+"uniform vec4 colDiffuse;\n"
+"uniform vec2 center;\n"
+"uniform float radius;\n"
+"uniform float smoothness;\n"
+"uniform vec2 renderSize;\n"
+"out vec4 finalColor;\n"
+"void main()\n"
+"{\n"
+"    vec2 NNfragTexCoord = fragTexCoord * renderSize;\n"
+"    float L = length(center - NNfragTexCoord);\n"
+"    float edgeThreshold = radius; \n"
+"    float alpha = smoothstep(edgeThreshold - smoothness, edgeThreshold, L);\n"
+"    if (L <= radius) {\n"
+"        finalColor = texture(texture0, fragTexCoord) * fragColor;\n"
+"        finalColor.a *= (1.0 - alpha);\n"
+"    } else {\n"
+"        finalColor = vec4(0.0);\n"
+"    }\n"
+"}";
 
 static float zoom = STARTING_ZOOM;
 
@@ -204,7 +228,7 @@ void DrawCollisionTextureCircle(Texture2D texture,
 																float radius,
 																Color color)
 {
-	Shader shader = LoadShader(0, TextFormat(CIRCLE_TEXTURE_FILE_PATH, GLSL_VERSION));
+	Shader shader = LoadShaderFromMemory(0, CIRCLE_SHADER);
 	int radius_loc = GetShaderLocation(shader, "radius");
 	SetShaderValue(shader, radius_loc, &radius, SHADER_UNIFORM_FLOAT);
 
