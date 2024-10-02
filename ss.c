@@ -20,10 +20,6 @@ typedef int32_t i32;
 typedef uint64_t u64;
 typedef u64 usize;
 
-typedef struct { u8 r, g, b; } RGB;
-
-typedef struct { float w, h, x, y; } whxy_t;
-
 #define WHXY_UNPACK \
 	float w = whxy.w; \
 	float h = whxy.h; \
@@ -68,6 +64,7 @@ typedef struct { float w, h, x, y; } whxy_t;
 #define BOOSTED_ZOOM_SPEED 2.2f
 #define MIN_ZOOM 0.7f
 #define MAX_ZOOM 10.0f
+#define STARTING_ZOOM 1.0f
 
 #define PANNING_FACTOR 5.0f
 #define PANNING_ZOOM_FACTOR 0.2f
@@ -77,7 +74,6 @@ typedef struct { float w, h, x, y; } whxy_t;
 
 #define RADIUS_ZOOM_OUT_FACTOR 7.6f
 #define STARTING_RADIUS 150
-#define STARTING_ZOOM 1.0f
 
 #define GLSL_VERSION 300
 
@@ -88,6 +84,10 @@ typedef struct { float w, h, x, y; } whxy_t;
 #define XTEXTURES \
 	X(screenshot_texture); \
 	X(darker_screenshot_texture);
+
+typedef struct { u8 r, g, b; } RGB;
+
+typedef struct { float w, h, x, y; } whxy_t;
 
 static float zoom = STARTING_ZOOM;
 
@@ -129,9 +129,9 @@ INLINE void deinit_raylib(void)
 }
 
 INLINE void fill_image(Image *image,
-															int w, int h,
-															int fmt,
-															void *data)
+											 int w, int h,
+											 int fmt,
+											 void *data)
 {
 	image->width = (i32) w;
 	image->height = (i32) h;
@@ -140,9 +140,21 @@ INLINE void fill_image(Image *image,
 	image->data = data;
 }
 
+INLINE u8 darken_channel(u8 c)
+{
+	return MIN(0xFF, MAX(0, c*DARKEN_FACTOR));
+}
+
 void capture_screen(Window root, XWindowAttributes gwa)
 {
-	XImage *ximage = XGetImage(xdisplay, root, 0, 0, gwa.width, gwa.height, AllPlanes, ZPixmap);
+	XImage *ximage = XGetImage(xdisplay,
+														 root,
+														 0, 0,
+														 gwa.width,
+														 gwa.height,
+														 AllPlanes,
+														 ZPixmap);
+
 	if (!ximage) {
 		panic("could not capture screen using `XGetImage`\n");
 	}
@@ -166,9 +178,9 @@ void capture_screen(Window root, XWindowAttributes gwa)
 			data[idx + 1] = g;
 			data[idx + 2] = b;
 
-			darker_data[idx]     = MIN(0xFF, MAX(0, (i32) (r*DARKEN_FACTOR)));
-			darker_data[idx + 1] = MIN(0xFF, MAX(0, (i32) (g*DARKEN_FACTOR)));
-			darker_data[idx + 2] = MIN(0xFF, MAX(0, (i32) (b*DARKEN_FACTOR)));
+			darker_data[idx]     = darken_channel(r);
+			darker_data[idx + 1] = darken_channel(g);
+			darker_data[idx + 2] = darken_channel(b);
 		}
 	}
 
@@ -268,6 +280,22 @@ INLINE void save_image_data(char *file_path,
 								 sizeof(RGB)*w);
 }
 
+u8 *crop_image(const u8 *img_data,
+							 usize img_w,
+							 usize w, usize h,
+							 usize x, usize y)
+{
+	u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
+
+	for (usize row = 0; row < h; row++) {
+		usize src_offset = ((y + row)*img_w + x)*sizeof(RGB);
+		usize dst_offset = row*w*sizeof(RGB);
+		memcpy(data + dst_offset, img_data + src_offset, w*sizeof(RGB));
+	}
+
+	return data;
+}
+
 void handle_input(void)
 {
 	const float mouse_move = GetMouseWheelMove();
@@ -300,11 +328,16 @@ void handle_input(void)
 
 			WHXY_UNPACK_USIZE
 
+			x = (x - image_pos.x) / zoom;
+			y = (y - image_pos.y) / zoom;
+			w /= zoom;
+			h /= zoom;
+
 			u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
 
 			for (usize row = 0; row < h; row++) {
-				usize src_offset = ((y + row)*screenshot.width + x)*sizeof(RGB);
-				usize dst_offset = row*w*sizeof(RGB);
+				const usize src_offset = ((y + row)*screenshot.width + x)*sizeof(RGB);
+				const usize dst_offset = row*w*sizeof(RGB);
 				memcpy(data + dst_offset, original_image_data + src_offset, w*sizeof(RGB));
 			}
 
@@ -366,7 +399,7 @@ void handle_input(void)
 
 	if (alt_mode && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
 		if (!selection_mode) {
-			selection_start = mouse_pos;			
+			selection_start = mouse_pos;
 			selection_mode = true;
 		} else if (!preserve_selection_mode
 					 &&	!IsMouseButtonDown(MOUSE_LEFT_BUTTON))
