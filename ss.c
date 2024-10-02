@@ -333,13 +333,9 @@ void handle_input(void)
 			w /= zoom;
 			h /= zoom;
 
-			u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
-
-			for (usize row = 0; row < h; row++) {
-				const usize src_offset = ((y + row)*screenshot.width + x)*sizeof(RGB);
-				const usize dst_offset = row*w*sizeof(RGB);
-				memcpy(data + dst_offset, original_image_data + src_offset, w*sizeof(RGB));
-			}
+			u8 *data = crop_image(original_image_data,
+														screenshot.width,
+														w, h, x, y);
 
 			stop_selection_mode();
 
