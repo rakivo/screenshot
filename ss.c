@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include <raylib.h>
+#include <raymath.h>
 
 #define Font XFont
 #include <X11/Xlib.h>
@@ -61,7 +62,7 @@
 #define STARTING_ZOOM 1.0f
 
 #define PANNING_FACTOR 5.0f
-#define PANNING_ZOOM_FACTOR 0.2f
+#define PANNING_ZOOM_FACTOR 0.18f
 
 #define SCROLL_SPEED 150.0f
 #define SMOOTHING_FACTOR 0.1f
@@ -143,9 +144,7 @@ static u8 resizing_what = SELECTION_POISONED;
 #define SELECTION_UNINITIALIZED 0.0f
 static Vector2 selection_start, selection_end = {SELECTION_UNINITIALIZED, SELECTION_UNINITIALIZED};
 
-static Vector2 cur_pos, image_pos, pan_cur_pos, dmouse_pos = {0};
-
-static bool raylib_initialized = false;
+static Vector2 cur_pos, image_pos, dmouse_pos = {0};
 
 static Display *xdisplay = NULL;
 static XWindowAttributes gwa = {0};
@@ -155,22 +154,20 @@ static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
 static uint8_t *original_image_data = NULL;
 
-INLINE static void init_raylib(i32 w, i32 h)
+INLINE static void init_raylib(void)
 {
-	SetTargetFPS(144);
+	const int m = GetCurrentMonitor();
+	SetTargetFPS(GetMonitorRefreshRate(m));
 	SetTraceLogLevel(LOG_NONE);
 	if (!DEBUG) SetConfigFlags(WINDOW_FLAGS);
-	InitWindow(w, h, "ss");
+	InitWindow(GetMonitorWidth(m), GetMonitorHeight(m), "ss");
 	SetExitKey(0);
 	HideCursor();
-	raylib_initialized = true;
 }
 
 INLINE static void deinit_raylib(void)
 {
-	if (raylib_initialized) {
-		CloseWindow();
-	}
+	CloseWindow();
 }
 
 INLINE void fill_image(Image *image,
@@ -249,20 +246,20 @@ void DrawCollisionTextureCircle(Texture2D texture,
 																float radius,
 																Color color)
 {
-	Shader shader = LoadShaderFromMemory(0, CIRCLE_SHADER);
-	int radius_loc = GetShaderLocation(shader, "radius");
+	const Shader shader = LoadShaderFromMemory(0, CIRCLE_SHADER);
+	const int radius_loc = GetShaderLocation(shader, "radius");
 	SetShaderValue(shader, radius_loc, &radius, SHADER_UNIFORM_FLOAT);
 
-	float ci_ce[2] = {circle_center.x, circle_center.y};
-	int center_loc = GetShaderLocation(shader, "center");
+	const float ci_ce[2] = {circle_center.x, circle_center.y};
+	const int center_loc = GetShaderLocation(shader, "center");
 	SetShaderValue(shader, center_loc, &ci_ce, SHADER_UNIFORM_VEC2);
 
-	float resolution[2] = {texture.width, texture.height};
-	int resol_loc = GetShaderLocation(shader, "renderSize");
+	const float resolution[2] = {texture.width, texture.height};
+	const int resol_loc = GetShaderLocation(shader, "renderSize");
 	SetShaderValue(shader, resol_loc, &resolution, SHADER_UNIFORM_VEC2);
 
-	float smoothness = 10.0f;
-	int smoothnessLoc = GetShaderLocation(shader, "smoothness");
+	const float smoothness = 10.0f;
+	const int smoothnessLoc = GetShaderLocation(shader, "smoothness");
 	SetShaderValue(shader, smoothnessLoc, &smoothness, SHADER_UNIFORM_FLOAT);
 
 	BeginShaderMode(shader);
@@ -334,8 +331,8 @@ char *get_file_path_(char *file_path, u64 rec_count)
 
 INLINE static void save_fullscreen(void)
 {
-	char *file_path = get_file_path(OUTPUT_FILE_NAME
-																	OUTPUT_FILE_EXTENSION);
+	const char *file_path = get_file_path(OUTPUT_FILE_NAME
+																				OUTPUT_FILE_EXTENSION);
 	stbi_write_png(file_path,
 								 screenshot.width,
 								 screenshot.height,
@@ -346,8 +343,8 @@ INLINE static void save_fullscreen(void)
 
 INLINE void save_image_data(uint8_t *data, int w, int h)
 {
-	char *file_path = get_file_path(OUTPUT_FILE_NAME
-																	OUTPUT_FILE_EXTENSION);
+	const char *file_path = get_file_path(OUTPUT_FILE_NAME
+																				OUTPUT_FILE_EXTENSION);
 	stbi_write_png(file_path,
 								 w, h,
 								 sizeof(RGB),
@@ -433,6 +430,17 @@ u8 selection_check_corner_collisions(Vector2 mouse_pos)
 	return SELECTION_POISONED;
 }
 
+INLINE Vector2 Vector2Value(float value)
+{
+	return (Vector2) {value, value};
+}
+
+INLINE Vector2 Vector2DivideValue(Vector2 v, float div)
+{
+  Vector2 result = { v.x / div, v.y / div };
+	return result;
+}
+
 void handle_input(void)
 {
 	const float wheel_move = GetMouseWheelMove();
@@ -451,16 +459,17 @@ void handle_input(void)
 		HideCursor();
 	}
 
+	if (selection_mode && !resize_mode) {
+		selection_end = cur_pos;
+	}
+
 	if (resizing_now) {
 		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 			switch (resizing_what) {
 			case SELECTION_INSIDE: {
-				float dx = mouse_pos.x - dmouse_pos.x;
-				float dy = mouse_pos.y - dmouse_pos.y;
-				selection_start.x += dx;
-				selection_start.y += dy;
-				selection_end.x += dx;
-				selection_end.y += dy;
+				const Vector2 delta = Vector2Subtract(mouse_pos, dmouse_pos);
+				selection_start = Vector2Add(selection_start, delta);
+				selection_end = Vector2Add(selection_end, delta);
 			} break;
 
 			case SELECTION_UPPER_LEFT: {
@@ -500,12 +509,14 @@ void handle_input(void)
 
 	if (IsKeyPressed(KEY_ESCAPE)) {
 		if (selection_mode) {
+			stop_resizing();
 			stop_selection_mode();
 		} else {
 			zoom = STARTING_ZOOM;
 			radius = STARTING_RADIUS;
-			image_pos = (Vector2) {0};
+			image_pos = Vector2Zero();
 			cur_pos = (Vector2) {center_x, center_y};
+			SetMousePosition(center_x, center_y);
 		}
 	}
 
@@ -532,12 +543,8 @@ void handle_input(void)
 		}
 	}
 
-	if (selection_mode && !resize_mode) {
-		selection_end = cur_pos;
-	}
-
 	if (resize_mode && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-		u8 corner = selection_check_corner_collisions(mouse_pos);
+		const u8 corner = selection_check_corner_collisions(mouse_pos);
 		if (corner != SELECTION_POISONED) {
 			resizing_now = true;
 			resizing_what = corner;
@@ -548,7 +555,7 @@ void handle_input(void)
 	}
 
 	if (wheel_move != 0) {
-		if (IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
+		if(IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
 			float offset = -SCROLL_SPEED*wheel_move;
 
 			if (offset <= 0) {
@@ -560,51 +567,34 @@ void handle_input(void)
 			const float tradius = MIN(MIN(gwa.width, gwa.height), MAX(15.0, radius + sine*sens));
 			radius += (tradius - radius)*SMOOTHING_FACTOR;
 		} else {
-			Vector2 offset = {
-				(mouse_pos.x - image_pos.x) / zoom,
-				(mouse_pos.y - image_pos.y) / zoom
-			};
+			Vector2 offset = Vector2DivideValue(Vector2Subtract(mouse_pos, image_pos), zoom);
 
 			const float zs = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_ZOOM_SPEED : ZOOM_SPEED;
 			zoom += wheel_move*0.1f*zs;
 			zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
 
-			image_pos.x = mouse_pos.x - offset.x*zoom;
-			image_pos.y = mouse_pos.y - offset.y*zoom;
+			image_pos = Vector2Subtract(mouse_pos,
+																	Vector2Multiply(offset, Vector2Value(zoom)));
 		}
 	}
 
 	if (IsKeyDown(KEY_SPACE)) {
 		if (!pan_mode) {
 			pan_mode = true;
-			pan_cur_pos = mouse_pos;
 		}
-
-		const float dx = mouse_pos.x - pan_cur_pos.x;
-		const float dy = mouse_pos.y - pan_cur_pos.y;
-
-		image_pos.x += (dx*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
-		image_pos.y += (dy*PANNING_FACTOR)*(zoom*PANNING_ZOOM_FACTOR);
-
-		pan_cur_pos = mouse_pos;
+		Vector2 delta = Vector2Subtract(mouse_pos, dmouse_pos);
+		delta = Vector2Scale(delta, PANNING_FACTOR*(zoom*PANNING_ZOOM_FACTOR));
+		image_pos = Vector2Add(image_pos, delta);
+		cur_pos = mouse_pos;
 	} else {
 		pan_mode = false;
 	}
 
-	if (alt_mode && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
-		if (!selection_mode) {
+	if (alt_mode) {
+		if (!selection_mode && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
 			selection_start = mouse_pos;
 			selection_mode = true;
-		} else if (!resize_mode
-					 &&	!IsMouseButtonDown(MOUSE_LEFT_BUTTON))
-		{
-			stop_selection_mode();
-			return;
-		}
-
-		if (!resize_mode
-		&&	IsMouseButtonPressed(MOUSE_RIGHT_BUTTON))
-		{
+ 		} else if (selection_mode && !IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
 			resize_mode = true;
 		}
 	} else if (selection_mode && !resize_mode) {
@@ -616,54 +606,51 @@ void handle_input(void)
 
 void draw_selection(void)
 {
-	if (selection_mode
-	&&	selection_start.x != SELECTION_UNINITIALIZED)
-	{
-		DrawTextureEx(darker_screenshot_texture,
-									image_pos,
-									0,
-									zoom,
-									WHITE);
+	if (selection_start.x == SELECTION_UNINITIALIZED) return;
+	DrawTextureEx(darker_screenshot_texture,
+								image_pos,
+								0,
+								zoom,
+								WHITE);
 
-		const whxy_t whxy = get_selection_data();
-		WHXY_UNPACK
+	const whxy_t whxy = get_selection_data();
+	WHXY_UNPACK
 
-		const Rectangle selection = {
-			.height = h,
-			.width = w,
-			.x = x,
-			.y = y
-		};
+	const Rectangle selection = {
+		.height = h,
+		.width = w,
+		.x = x,
+		.y = y
+	};
 
-		const Rectangle src_rect = {
-			.x = (x - image_pos.x) / zoom,
-			.y = (y - image_pos.y) / zoom,
-			.width = w / zoom,
-			.height = h / zoom
-		};
+	const Rectangle src_rect = {
+		.x = (x - image_pos.x) / zoom,
+		.y = (y - image_pos.y) / zoom,
+		.width = w / zoom,
+		.height = h / zoom
+	};
 
-		DrawTexturePro(screenshot_texture,
-									 src_rect,
-									 selection,
-									 (Vector2) {0},
-									 0,
-									 WHITE);
+	DrawTexturePro(screenshot_texture,
+								 src_rect,
+								 selection,
+								 Vector2Zero(),
+								 0,
+								 WHITE);
 
-		float in_rad = RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS;
-		float out_rad = RESIZE_RING_RADIUS;
-		float start_angle = 0.0f;
-		float end_angle = 365.0f;
-		int segments = 30;
-		Color color = RED;
+	float in_rad = RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS;
+	float out_rad = RESIZE_RING_RADIUS;
+	float start_angle = 0.0f;
+	float end_angle = 365.0f;
+	int segments = 30;
+	Color color = RED;
 
-		Vector2 up_l, up_r, bot_l, bot_r = {0};
-		get_selection_corners(whxy, &up_l, &up_r, &bot_l, &bot_r);
+	Vector2 up_l, up_r, bot_l, bot_r = {0};
+	get_selection_corners(whxy, &up_l, &up_r, &bot_l, &bot_r);
 
-		DrawRing(up_l,  in_rad, out_rad, start_angle, end_angle, segments, color);
-		DrawRing(up_r,  in_rad, out_rad, start_angle, end_angle, segments, color);
-		DrawRing(bot_l, in_rad, out_rad, start_angle, end_angle, segments, color);
-		DrawRing(bot_r, in_rad, out_rad, start_angle, end_angle, segments, color);
-	}
+	DrawRing(up_l,  in_rad, out_rad, start_angle, end_angle, segments, color);
+	DrawRing(up_r,  in_rad, out_rad, start_angle, end_angle, segments, color);
+	DrawRing(bot_l, in_rad, out_rad, start_angle, end_angle, segments, color);
+	DrawRing(bot_r, in_rad, out_rad, start_angle, end_angle, segments, color);
 }
 
 INLINE static void save_original_image_data(void)
@@ -690,14 +677,13 @@ i32 main(void)
 	capture_screen(root, gwa);
 	save_original_image_data();
 
-	init_raylib(gwa.width, gwa.height);
-
-	output_file_name_len = strlen(OUTPUT_FILE_NAME);
+	init_raylib();
 
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
 
 	cur_pos = (Vector2) {center_x, center_y};
+	output_file_name_len = strlen(OUTPUT_FILE_NAME);
 
 	while (!WindowShouldClose()) {
 		handle_input();
