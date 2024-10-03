@@ -69,6 +69,9 @@
 #define RADIUS_ZOOM_OUT_FACTOR 7.6f
 #define STARTING_RADIUS 150
 
+#define RESIZE_RING_RADIUS 11.0f
+#define RESIZE_RING_THICKNESS 1.3f
+
 #define GLSL_VERSION 300
 
 #define XSCREENSHOTS \
@@ -88,6 +91,15 @@ typedef u64 usize;
 typedef struct { u8 r, g, b; } RGB;
 
 typedef struct { float w, h, x, y; } whxy_t;
+
+enum {
+	SELECTION_POISONED = 0,
+	SELECTION_INSIDE,
+	SELECTION_UPPER_LEFT,
+	SELECTION_UPPER_RIGHT,
+	SELECTION_BOTTOM_LEFT,
+	SELECTION_BOTTOM_RIGHT
+};
 
 // Stolen from: <https://github.com/NSinecode/Raylib-Drawing-texture-in-circle/blob/master/CircleTexture.frag>
 const char* CIRCLE_SHADER = 
@@ -124,12 +136,14 @@ static float zoom = STARTING_ZOOM;
 
 static u32 radius = STARTING_RADIUS;
 
-static bool pan_mode, alt_mode, selection_mode, preserve_selection_mode = false;
+static bool pan_mode, alt_mode, selection_mode, resize_mode;
+static bool resizing_now = false;
+static u8 resizing_what = SELECTION_POISONED;
 
 #define SELECTION_UNINITIALIZED 0.0f
 static Vector2 selection_start, selection_end = {SELECTION_UNINITIALIZED, SELECTION_UNINITIALIZED};
 
-static Vector2 cur_pos, image_pos, pan_cur_pos = {0};
+static Vector2 cur_pos, image_pos, pan_cur_pos, dmouse_pos = {0};
 
 static bool raylib_initialized = false;
 
@@ -270,7 +284,13 @@ INLINE static void stop_selection_mode(void)
 				 sizeof(selection_end));
 
 	selection_mode = false;
-	preserve_selection_mode = false;
+	resize_mode = false;
+}
+
+INLINE static void stop_resizing(void)
+{
+	resizing_now = false;
+	resizing_what = SELECTION_POISONED;
 }
 
 INLINE float clamp(float v, float min, float max)
@@ -351,19 +371,131 @@ u8 *crop_image(const u8 *img_data,
 	return data;
 }
 
+void get_selection_corners(whxy_t whxy,
+													 Vector2 *upper_left,
+													 Vector2 *upper_right,
+													 Vector2 *bottom_left,
+													 Vector2 *bottom_right)
+{
+	WHXY_UNPACK
+
+	upper_left->x = x;
+	upper_left->y = y;
+
+	upper_right->x = x + w;
+	upper_right->y = y;
+
+	bottom_left->x = x;
+	bottom_left->y = y + h;
+
+	bottom_right->x = x + w;
+	bottom_right->y = y + h;
+}
+
+bool selection_check_collisions(Vector2 mouse_pos)
+{
+	const whxy_t whxy = get_selection_data();
+	WHXY_UNPACK
+
+	const Rectangle rec = (Rectangle) {
+		.width = w,
+		.height = h,
+		.x = x,
+		.y = y,
+	};
+
+	return CheckCollisionPointRec(mouse_pos, rec);
+}
+
+u8 selection_check_corner_collisions(Vector2 mouse_pos)
+{
+	Vector2 up_l, up_r, bot_l, bot_r = {0};
+	get_selection_corners(get_selection_data(),
+												&up_l, &up_r,
+												&bot_l, &bot_r);
+
+	if (CheckCollisionPointCircle(mouse_pos, up_l, RESIZE_RING_RADIUS)) {
+		return SELECTION_UPPER_LEFT;
+	}
+
+	if (CheckCollisionPointCircle(mouse_pos, up_r, RESIZE_RING_RADIUS)) {
+		return SELECTION_UPPER_RIGHT;
+	}
+
+	if (CheckCollisionPointCircle(mouse_pos, bot_l, RESIZE_RING_RADIUS)) {
+		return SELECTION_BOTTOM_LEFT;
+	}
+
+	if (CheckCollisionPointCircle(mouse_pos, bot_r, RESIZE_RING_RADIUS)) {
+		return SELECTION_BOTTOM_RIGHT;
+	}
+
+	return SELECTION_POISONED;
+}
+
 void handle_input(void)
 {
-	const float mouse_move = GetMouseWheelMove();
+	const float wheel_move = GetMouseWheelMove();
 	const Vector2 mouse_pos = GetMousePosition();
 
 	cur_pos = mouse_pos;
 	alt_mode = IsKeyDown(KEY_LEFT_ALT);
 
-	if (alt_mode || preserve_selection_mode) {
+	if (resizing_now) {
+		ShowCursor();
+		SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+	} else if (alt_mode || resize_mode) {
 		ShowCursor();
 		SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
 	} else {
 		HideCursor();
+	}
+
+	if (resizing_now) {
+		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+			switch (resizing_what) {
+			case SELECTION_INSIDE: {
+				float dx = mouse_pos.x - dmouse_pos.x;
+				float dy = mouse_pos.y - dmouse_pos.y;
+				selection_start.x += dx;
+				selection_start.y += dy;
+				selection_end.x += dx;
+				selection_end.y += dy;
+			} break;
+
+			case SELECTION_UPPER_LEFT: {
+				if (mouse_pos.x > 0) {
+					selection_start.x = mouse_pos.x;
+				}
+				selection_start.y = mouse_pos.y;
+			} break;
+
+			case SELECTION_UPPER_RIGHT: {
+				if (mouse_pos.x > 0) {
+					selection_end.x = mouse_pos.x;
+				}
+				selection_start.y = mouse_pos.y;
+			} break;
+
+			case SELECTION_BOTTOM_LEFT: {
+				if (mouse_pos.x > 0) {
+					selection_start.x = mouse_pos.x;
+				}
+				selection_end.y = mouse_pos.y;
+			} break;
+
+			case SELECTION_BOTTOM_RIGHT: {
+				if (mouse_pos.x > 0) {
+					selection_end.x = mouse_pos.x;
+				}
+				selection_end.y = mouse_pos.y;
+			} break;
+
+			default: panic("unreachable"); break;
+			}
+		} else {
+			stop_resizing();
+		}
 	}
 
 	if (IsKeyPressed(KEY_ESCAPE)) {
@@ -400,13 +532,24 @@ void handle_input(void)
 		}
 	}
 
-	if (selection_mode && !preserve_selection_mode) {
+	if (selection_mode && !resize_mode) {
 		selection_end = cur_pos;
 	}
 
-	if (mouse_move != 0) {
+	if (resize_mode && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+		u8 corner = selection_check_corner_collisions(mouse_pos);
+		if (corner != SELECTION_POISONED) {
+			resizing_now = true;
+			resizing_what = corner;
+		} else if (selection_check_collisions(mouse_pos)) {
+			resizing_now = true;
+			resizing_what = SELECTION_INSIDE;
+		}
+	}
+
+	if (wheel_move != 0) {
 		if (IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
-			float offset = -SCROLL_SPEED*mouse_move;
+			float offset = -SCROLL_SPEED*wheel_move;
 
 			if (offset <= 0) {
 				offset*=-RADIUS_ZOOM_OUT_FACTOR;
@@ -423,7 +566,7 @@ void handle_input(void)
 			};
 
 			const float zs = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_ZOOM_SPEED : ZOOM_SPEED;
-			zoom += mouse_move*0.1f*zs;
+			zoom += wheel_move*0.1f*zs;
 			zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
 
 			image_pos.x = mouse_pos.x - offset.x*zoom;
@@ -452,21 +595,23 @@ void handle_input(void)
 		if (!selection_mode) {
 			selection_start = mouse_pos;
 			selection_mode = true;
-		} else if (!preserve_selection_mode
+		} else if (!resize_mode
 					 &&	!IsMouseButtonDown(MOUSE_LEFT_BUTTON))
 		{
 			stop_selection_mode();
 			return;
 		}
 
-		if (!preserve_selection_mode
+		if (!resize_mode
 		&&	IsMouseButtonPressed(MOUSE_RIGHT_BUTTON))
 		{
-			preserve_selection_mode = true;
+			resize_mode = true;
 		}
-	} else if (selection_mode && !preserve_selection_mode) {
+	} else if (selection_mode && !resize_mode) {
 		stop_selection_mode();
 	}
+
+	dmouse_pos = cur_pos;
 }
 
 void draw_selection(void)
@@ -503,6 +648,21 @@ void draw_selection(void)
 									 (Vector2) {0},
 									 0,
 									 WHITE);
+
+		float in_rad = RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS;
+		float out_rad = RESIZE_RING_RADIUS;
+		float start_angle = 0.0f;
+		float end_angle = 365.0f;
+		int segments = 30;
+		Color color = RED;
+
+		Vector2 up_l, up_r, bot_l, bot_r = {0};
+		get_selection_corners(whxy, &up_l, &up_r, &bot_l, &bot_r);
+
+		DrawRing(up_l,  in_rad, out_rad, start_angle, end_angle, segments, color);
+		DrawRing(up_r,  in_rad, out_rad, start_angle, end_angle, segments, color);
+		DrawRing(bot_l, in_rad, out_rad, start_angle, end_angle, segments, color);
+		DrawRing(bot_r, in_rad, out_rad, start_angle, end_angle, segments, color);
 	}
 }
 
