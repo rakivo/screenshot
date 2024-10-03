@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -11,14 +12,20 @@
 #include <X11/Xutil.h>
 #undef Font
 
+#define SCRATCH_BUFFER_IMPLEMENTATION
+#include "scratch_buffer.h"
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-typedef uint8_t u8;
-typedef uint32_t u32;
-typedef int32_t i32;
-typedef uint64_t u64;
-typedef u64 usize;
+#define DEBUG 0
+
+#define eprintf(...) fprintf(stderr, __VA_ARGS__)
+#define panic(...) do { \
+	eprintf(__VA_ARGS__); \
+	deinit_raylib(); \
+	exit(1); \
+} while (0)
 
 #define WHXY_UNPACK \
 	float w = whxy.w; \
@@ -32,22 +39,11 @@ typedef u64 usize;
 	usize x = (usize) whxy.x; \
 	usize y = (usize) whxy.y;
 
-#define eprintf(...) fprintf(stderr, __VA_ARGS__)
-#define panic(...) do { \
-	eprintf(__VA_ARGS__); \
-	deinit_raylib(); \
-	exit(1); \
-} while (0)
-
-#define DEBUG 0
-
 #define center_x (GetScreenWidth() / 2)
 #define center_y (GetScreenHeight() / 2)
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-#define INLINE static inline
 
 #define BACKGROUND_COLOR ((Color) {10, 10, 10, 255})
 
@@ -83,6 +79,12 @@ typedef u64 usize;
 	X(screenshot_texture); \
 	X(darker_screenshot_texture);
 
+typedef uint8_t u8;
+typedef uint32_t u32;
+typedef int32_t i32;
+typedef uint64_t u64;
+typedef u64 usize;
+
 typedef struct { u8 r, g, b; } RGB;
 
 typedef struct { float w, h, x, y; } whxy_t;
@@ -113,6 +115,11 @@ const char* CIRCLE_SHADER =
 "    }\n"
 "}";
 
+#define OUTPUT_FILE_NAME "screenshot"
+#define OUTPUT_FILE_EXTENSION ".png"
+
+static size_t output_file_name_len = 0;
+
 static float zoom = STARTING_ZOOM;
 
 static u32 radius = STARTING_RADIUS;
@@ -134,7 +141,7 @@ static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
 static uint8_t *original_image_data = NULL;
 
-INLINE void init_raylib(i32 w, i32 h)
+INLINE static void init_raylib(i32 w, i32 h)
 {
 	SetTargetFPS(144);
 	SetTraceLogLevel(LOG_NONE);
@@ -145,7 +152,7 @@ INLINE void init_raylib(i32 w, i32 h)
 	raylib_initialized = true;
 }
 
-INLINE void deinit_raylib(void)
+INLINE static void deinit_raylib(void)
 {
 	if (raylib_initialized) {
 		CloseWindow();
@@ -252,7 +259,7 @@ void DrawCollisionTextureCircle(Texture2D texture,
 	UnloadShader(shader);
 }
 
-INLINE void stop_selection_mode(void)
+INLINE static void stop_selection_mode(void)
 {
 	memset(&selection_start,
 				 SELECTION_UNINITIALIZED,
@@ -273,7 +280,7 @@ INLINE float clamp(float v, float min, float max)
 	return ret;
 }
 
-INLINE whxy_t get_selection_data(void)
+INLINE static whxy_t get_selection_data(void)
 {
 	return (whxy_t) {
 		.w = fabsf(selection_end.x - selection_start.x),
@@ -283,8 +290,32 @@ INLINE whxy_t get_selection_data(void)
 	};
 }
 
-INLINE void save_fullscreen(char *file_path)
+// add _<number> at the end if needed to prevent overwriting
+char *get_file_path_(char *file_path, u64 rec_count)
 {
+	if (access(file_path, F_OK) == 0) {
+		scratch_buffer_clear();
+		char *number_start = file_path + output_file_name_len;
+		if (*number_start == '\0') {
+			scratch_buffer_printf("%s_%zu.png", OUTPUT_FILE_NAME, 0);
+		} else {
+			//										skip `_`
+			u64 number = strtoull(number_start + 1, NULL, 10);
+			scratch_buffer_printf("%s_%zu.png", OUTPUT_FILE_NAME, number + 1);
+		}
+
+		return get_file_path_(scratch_buffer_to_string(), rec_count++);
+	}
+
+	return file_path;
+}
+
+#define get_file_path(...) get_file_path_(__VA_ARGS__, 0)
+
+INLINE static void save_fullscreen(void)
+{
+	char *file_path = get_file_path(OUTPUT_FILE_NAME
+																	OUTPUT_FILE_EXTENSION);
 	stbi_write_png(file_path,
 								 screenshot.width,
 								 screenshot.height,
@@ -293,10 +324,10 @@ INLINE void save_fullscreen(char *file_path)
 								 sizeof(RGB)*screenshot.width);
 }
 
-INLINE void save_image_data(char *file_path,
-													  uint8_t *data,
-													  int w, int h)
+INLINE void save_image_data(uint8_t *data, int w, int h)
 {
+	char *file_path = get_file_path(OUTPUT_FILE_NAME
+																	OUTPUT_FILE_EXTENSION);
 	stbi_write_png(file_path,
 								 w, h,
 								 sizeof(RGB),
@@ -363,9 +394,9 @@ void handle_input(void)
 
 			stop_selection_mode();
 
-			save_image_data("screenshot.png", data, w, h);
+			save_image_data(data, w, h);
 		} else {
-			save_fullscreen("screenshot.png");
+			save_fullscreen();
 		}
 	}
 
@@ -475,7 +506,7 @@ void draw_selection(void)
 	}
 }
 
-INLINE void save_original_image_data(void)
+INLINE static void save_original_image_data(void)
 {
 	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
 																					 screenshot.width*
@@ -499,8 +530,9 @@ i32 main(void)
 	capture_screen(root, gwa);
 	save_original_image_data();
 
-	XCloseDisplay(xdisplay);
 	init_raylib(gwa.width, gwa.height);
+
+	output_file_name_len = strlen(OUTPUT_FILE_NAME);
 
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
@@ -544,6 +576,7 @@ i32 main(void)
 #undef X
 
 	deinit_raylib();
+	XCloseDisplay(xdisplay);
 
 	return 0;
 }
