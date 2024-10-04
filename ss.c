@@ -34,11 +34,11 @@
 	float x = whxy.x; \
 	float y = whxy.y;
 
-#define WHXY_UNPACK_USIZE \
-	usize w = (usize) whxy.w; \
-	usize h = (usize) whxy.h; \
-	usize x = (usize) whxy.x; \
-	usize y = (usize) whxy.y;
+#define WHXY_UNPACK_I32 \
+	i32 w = (i32) whxy.w; \
+	i32 h = (i32) whxy.h; \
+	i32 x = (i32) whxy.x; \
+	i32 y = (i32) whxy.y;
 
 #define center_x (GetScreenWidth() / 2)
 #define center_y (GetScreenHeight() / 2)
@@ -70,8 +70,10 @@
 #define RADIUS_ZOOM_OUT_FACTOR 7.6f
 #define STARTING_RADIUS 150
 
-#define RESIZE_RING_RADIUS 11.0f
+#define RESIZE_RING_RADIUS 8.0f
 #define RESIZE_RING_THICKNESS 1.3f
+#define RESIZE_RING_SEGMENTS 25
+#define RESIZE_RING_COLOR ((Color) {0, 170, 47, 255})
 
 #define GLSL_VERSION 300
 
@@ -157,7 +159,7 @@ static uint8_t *original_image_data = NULL;
 INLINE static void init_raylib(void)
 {
 	const int m = GetCurrentMonitor();
-	SetTargetFPS(GetMonitorRefreshRate(m));
+	SetTargetFPS(144);
 	SetTraceLogLevel(LOG_NONE);
 	if (!DEBUG) SetConfigFlags(WINDOW_FLAGS);
 	InitWindow(GetMonitorWidth(m), GetMonitorHeight(m), "ss");
@@ -352,22 +354,34 @@ INLINE void save_image_data(uint8_t *data, int w, int h)
 								 sizeof(RGB)*w);
 }
 
+INLINE i32 wrap(i32 x, i32 max)
+{
+	x = x % max;
+	if (x < 0) {
+		x += max;
+	}
+	return x;
+}
+
 u8 *crop_image(const u8 *img_data,
-							 usize img_w,
-							 usize w, usize h,
-							 usize x, usize y)
+							 i32 img_w,
+							 i32 img_h,
+							 i32 w, i32 h,
+							 i32 x, i32 y)
 {
 	u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
-
-	for (usize row = 0; row < h; row++) {
-		usize src_offset = ((y + row)*img_w + x)*sizeof(RGB);
-		usize dst_offset = row*w*sizeof(RGB);
-		memcpy(data + dst_offset, img_data + src_offset, w*sizeof(RGB));
+	for (i32 row = 0; row < h; row++) {
+		i32 wy = wrap(y + row, img_h);
+		for (i32 col = 0; col < w; col++) {
+			i32 wx = wrap(x + col, img_w);
+			i32 src_offset = (wy*img_w + wx)*sizeof(RGB);
+			i32 dst_offset = (row*w + col)*sizeof(RGB);
+			memcpy(data + dst_offset, img_data + src_offset, sizeof(RGB));
+		}
 	}
 
 	return data;
 }
-
 void get_selection_corners(whxy_t whxy,
 													 Vector2 *upper_left,
 													 Vector2 *upper_right,
@@ -524,26 +538,26 @@ void handle_input(void)
 		if (selection_mode) {
 			const whxy_t whxy = get_selection_data();
 
-			WHXY_UNPACK_USIZE
+			WHXY_UNPACK_I32
 
-			x = (x - image_pos.x) / zoom;
-			y = (y - image_pos.y) / zoom;
+			x = fabsf(x - image_pos.x) / zoom;
+			y = fabsf(y - image_pos.y) / zoom;
 			w /= zoom;
 			h /= zoom;
 
 			u8 *data = crop_image(original_image_data,
 														screenshot.width,
+														screenshot.height,
 														w, h, x, y);
 
 			stop_selection_mode();
-
 			save_image_data(data, w, h);
 		} else {
 			save_fullscreen();
 		}
 	}
 
-	if (resize_mode && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+	if (resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 		const u8 corner = selection_check_corner_collisions(mouse_pos);
 		if (corner != SELECTION_POISONED) {
 			resizing_now = true;
@@ -637,20 +651,36 @@ void draw_selection(void)
 								 0,
 								 WHITE);
 
-	float in_rad = RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS;
-	float out_rad = RESIZE_RING_RADIUS;
-	float start_angle = 0.0f;
-	float end_angle = 365.0f;
-	int segments = 30;
-	Color color = RED;
-
 	Vector2 up_l, up_r, bot_l, bot_r = {0};
 	get_selection_corners(whxy, &up_l, &up_r, &bot_l, &bot_r);
 
-	DrawRing(up_l,  in_rad, out_rad, start_angle, end_angle, segments, color);
-	DrawRing(up_r,  in_rad, out_rad, start_angle, end_angle, segments, color);
-	DrawRing(bot_l, in_rad, out_rad, start_angle, end_angle, segments, color);
-	DrawRing(bot_r, in_rad, out_rad, start_angle, end_angle, segments, color);
+	DrawRing(up_l,
+					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
+					 RESIZE_RING_RADIUS,
+					 0.0f, 365.0f,
+					 RESIZE_RING_SEGMENTS,
+					 RESIZE_RING_COLOR);
+
+	DrawRing(up_r,
+					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
+					 RESIZE_RING_RADIUS,
+					 0.0f, 365.0f,
+					 RESIZE_RING_SEGMENTS,
+					 RESIZE_RING_COLOR);
+
+	DrawRing(bot_l,
+					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
+					 RESIZE_RING_RADIUS,
+					 0.0f, 365.0f,
+					 RESIZE_RING_SEGMENTS,
+					 RESIZE_RING_COLOR);
+
+	DrawRing(bot_r,
+					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
+					 RESIZE_RING_RADIUS,
+					 0.0f, 365.0f,
+					 RESIZE_RING_SEGMENTS,
+					 RESIZE_RING_COLOR);
 }
 
 INLINE static void save_original_image_data(void)
