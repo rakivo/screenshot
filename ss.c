@@ -495,16 +495,6 @@ INLINE static Vector2 Vector2DivideValue(Vector2 v, float div)
 	return (Vector2) { v.x / div, v.y / div };
 }
 
-INLINE void flip_image_vertically(Image *image)
-{
-	unsigned char *flipped_data = (unsigned char *) malloc(image->width*image->height*sizeof(RGB));
-	for (int i = (image->height - 1), offset = 0; i >= 0; i--) {
-		memcpy(flipped_data + offset, ((unsigned char *)image->data) + i*image->width*sizeof(RGB), image->width*sizeof(RGB));
-		offset += image->width*sizeof(RGB);
-	}
-	image->data = flipped_data;
-}
-
 static void handle_input(void)
 {
 	const float wheel_move = GetMouseWheelMove();
@@ -624,11 +614,11 @@ static void handle_input(void)
 			};
 
 			// TODO: avoid flipping the image twice, but flip canvas once
-			flip_image_vertically(&image);
+			ImageFlipVertical(&image);
 
 			image.data = draw_canvas_into_image(image.data, image.width, image.height);
 
-			flip_image_vertically(&image);
+			ImageFlipVertical(&image);
 
 			u8 *data = crop_image(image.data,
 														screenshot.width,
@@ -639,7 +629,6 @@ static void handle_input(void)
 			save_image_data(data, w, h);
 
 			free(data);
-			free(drawn_data);
 		} else {
 			save_fullscreen();
 		}
