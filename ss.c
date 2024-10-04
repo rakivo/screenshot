@@ -356,10 +356,8 @@ INLINE void save_image_data(uint8_t *data, int w, int h)
 
 INLINE i32 wrap(i32 x, i32 max)
 {
-	x = x % max;
-	if (x < 0) {
-		x += max;
-	}
+	x %= max;
+	if (x < 0) x += max;
 	return x;
 }
 
@@ -382,6 +380,7 @@ u8 *crop_image(const u8 *img_data,
 
 	return data;
 }
+
 void get_selection_corners(whxy_t whxy,
 													 Vector2 *upper_left,
 													 Vector2 *upper_right,
