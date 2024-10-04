@@ -388,13 +388,11 @@ INLINE static void save_image_data(uint8_t *data, int w, int h)
 
 	Image image = (Image) {
 		.data = data,
-		.width = w,
+    .width = w,
     .height = h,
     .mipmaps = screenshot.mipmaps,
     .format = screenshot.format
 	};
-
-	image.data = draw_canvas_into_image(image.data, image.width, image.height);
 
 	ExportImage(image, file_path);
 }
@@ -495,6 +493,16 @@ INLINE static Vector2 Vector2Value(float value)
 INLINE static Vector2 Vector2DivideValue(Vector2 v, float div)
 {
 	return (Vector2) { v.x / div, v.y / div };
+}
+
+INLINE void flip_image_vertically(Image *image)
+{
+	unsigned char *flipped_data = (unsigned char *) malloc(image->width*image->height*sizeof(RGB));
+	for (int i = (image->height - 1), offset = 0; i >= 0; i--) {
+		memcpy(flipped_data + offset, ((unsigned char *)image->data) + i*image->width*sizeof(RGB), image->width*sizeof(RGB));
+		offset += image->width*sizeof(RGB);
+	}
+	image->data = flipped_data;
 }
 
 static void handle_input(void)
@@ -604,13 +612,34 @@ static void handle_input(void)
 			w /= zoom;
 			h /= zoom;
 
-			u8 *data = crop_image(original_image_data,
+			u8 *drawn_data = (u8 *) malloc(screenshot.width*screenshot.height*sizeof(RGB));
+			memcpy(drawn_data, original_image_data, screenshot.width*screenshot.height*sizeof(RGB));
+
+			Image image = (Image) {
+				.data = drawn_data,
+				.width = screenshot.width,
+			  .height = screenshot.height,
+			  .mipmaps = screenshot.mipmaps,
+			  .format = screenshot.format
+			};
+
+			// TODO: avoid flipping the image twice, but flip canvas once
+			flip_image_vertically(&image);
+
+			image.data = draw_canvas_into_image(image.data, image.width, image.height);
+
+			flip_image_vertically(&image);
+
+			u8 *data = crop_image(image.data,
 														screenshot.width,
 														screenshot.height,
 														w, h, x, y);
 
 			stop_selection_mode();
 			save_image_data(data, w, h);
+
+			free(data);
+			free(drawn_data);
 		} else {
 			save_fullscreen();
 		}
