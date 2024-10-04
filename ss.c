@@ -16,9 +16,6 @@
 #define SCRATCH_BUFFER_IMPLEMENTATION
 #include "scratch_buffer.h"
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
 #define DEBUG 0
 
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
@@ -347,27 +344,59 @@ char *get_file_path_(char *file_path, u64 rec_count)
 	return file_path;
 }
 
+INLINE static uint8_t *draw_canvas_into_image(uint8_t *data, int w, int h)
+{
+	Image image = (Image) {
+		.data = data,
+    .width = w,
+    .height = h,
+    .mipmaps = screenshot.mipmaps,
+    .format = screenshot.format
+	};
+
+	Image canvas_image = LoadImageFromTexture(canvas.texture);
+
+	Rectangle src_rec = {0, 0, canvas_image.width, canvas_image.height};
+	Rectangle dst_rec = {0, 0, image.width, image.height};
+
+	ImageDraw(&image, canvas_image, src_rec, dst_rec, WHITE);
+
+	return image.data;
+}
+
 INLINE static void save_fullscreen(void)
 {
 	const char *file_path = get_file_path(OUTPUT_FILE_NAME
 																				OUTPUT_FILE_EXTENSION);
-	stbi_write_png(file_path,
-								 gwa.width,
-								 gwa.height,
-								 sizeof(RGB),
-								 original_image_data,
-								 sizeof(RGB)*gwa.width);
+	Image image = (Image) {
+		.data = original_image_data,
+    .width = screenshot.width,
+    .height = screenshot.height,
+    .mipmaps = screenshot.mipmaps,
+    .format = screenshot.format
+	};
+
+	image.data = draw_canvas_into_image(image.data, image.width, image.height);
+
+	ExportImage(image, file_path);
 }
 
 INLINE static void save_image_data(uint8_t *data, int w, int h)
 {
 	const char *file_path = get_file_path(OUTPUT_FILE_NAME
 																				OUTPUT_FILE_EXTENSION);
-	stbi_write_png(file_path,
-								 w, h,
-								 sizeof(RGB),
-								 data,
-								 sizeof(RGB)*w);
+
+	Image image = (Image) {
+		.data = data,
+		.width = w,
+    .height = h,
+    .mipmaps = screenshot.mipmaps,
+    .format = screenshot.format
+	};
+
+	image.data = draw_canvas_into_image(image.data, image.width, image.height);
+
+	ExportImage(image, file_path);
 }
 
 INLINE static i32 wrap(i32 x, i32 max)
@@ -378,9 +407,9 @@ INLINE static i32 wrap(i32 x, i32 max)
 }
 
 INLINE static u8 *crop_image(const u8 *img_data,
-							 i32 img_w, i32 img_h,
-							 i32 w, i32 h,
-							 i32 x, i32 y)
+														 i32 img_w, i32 img_h,
+														 i32 w, i32 h,
+														 i32 x, i32 y)
 {
 	u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
 	for (i32 row = 0; row < h; row++) {
@@ -534,7 +563,9 @@ static void handle_input(void)
 		}
 	}
 
-	if (!alt_mode && !resize_mode && !pan_mode && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+	if ((!alt_mode || (resize_mode && !resizing_now))
+	&& IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+	{
 		BeginTextureMode(canvas);
 		{
 			const int nsteps = (int) Vector2Distance(dmouse_pos, mouse_pos);
@@ -594,7 +625,7 @@ static void handle_input(void)
 		if (corner != SELECTION_POISONED) {
 			resizing_now = true;
 			resizing_what = corner;
-		} else if (selection_check_collisions(mouse_pos)) {
+		} else if (alt_mode && selection_check_collisions(mouse_pos)) {
 			resizing_now = true;
 			resizing_what = SELECTION_INSIDE;
 		}
@@ -792,6 +823,7 @@ i32 main(int argc, char *argv[])
 											0,
 											zoom,
 											WHITE);
+
 			} else {
 				DrawTextureEx(darker_screenshot_texture,
 											image_pos,
@@ -804,9 +836,8 @@ i32 main(int argc, char *argv[])
 																	 cur_pos,
 																	 radius,
 																	 WHITE);
-
-				draw_canvas();
 			}
+			draw_canvas();
 		}
 		EndDrawing();
 	}
