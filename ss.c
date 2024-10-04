@@ -156,6 +156,9 @@ static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
 static uint8_t *original_image_data = NULL;
 
+static bool immediate_screenshot_and_exit = false;
+#define IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG "screenshot"
+
 INLINE static void init_raylib(void)
 {
 	const int m = GetCurrentMonitor();
@@ -336,11 +339,11 @@ INLINE static void save_fullscreen(void)
 	const char *file_path = get_file_path(OUTPUT_FILE_NAME
 																				OUTPUT_FILE_EXTENSION);
 	stbi_write_png(file_path,
-								 screenshot.width,
-								 screenshot.height,
+								 gwa.width,
+								 gwa.height,
 								 sizeof(RGB),
 								 original_image_data,
-								 sizeof(RGB)*screenshot.width);
+								 sizeof(RGB)*gwa.width);
 }
 
 INLINE void save_image_data(uint8_t *data, int w, int h)
@@ -362,8 +365,7 @@ INLINE i32 wrap(i32 x, i32 max)
 }
 
 u8 *crop_image(const u8 *img_data,
-							 i32 img_w,
-							 i32 img_h,
+							 i32 img_w, i32 img_h,
 							 i32 w, i32 h,
 							 i32 x, i32 y)
 {
@@ -682,7 +684,7 @@ void draw_selection(void)
 					 RESIZE_RING_COLOR);
 }
 
-INLINE static void save_original_image_data(void)
+INLINE static void preserve_original_image_data(void)
 {
 	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
 																					 screenshot.width*
@@ -693,8 +695,14 @@ INLINE static void save_original_image_data(void)
 				 sizeof(RGB)*screenshot.width*screenshot.height);
 }
 
-i32 main(void)
+i32 main(int argc, char *argv[])
 {
+	if (argc > 1) {
+		if (strstr(argv[1], IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG) != NULL) {
+			immediate_screenshot_and_exit = true;
+		}
+	}
+
 	xdisplay = XOpenDisplay(NULL);
 	if (!xdisplay) {
 		panic("could not to open X display");
@@ -703,16 +711,21 @@ i32 main(void)
 	const Window root = DefaultRootWindow(xdisplay);
 	XGetWindowAttributes(xdisplay, root, &gwa);
 
+	cur_pos = (Vector2) {center_x, center_y};
+	output_file_name_len = strlen(OUTPUT_FILE_NAME);
+
 	capture_screen(root, gwa);
-	save_original_image_data();
+	preserve_original_image_data();
+
+	if (immediate_screenshot_and_exit) {
+		save_fullscreen();
+		exit(0);
+	}
 
 	init_raylib();
 
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
-
-	cur_pos = (Vector2) {center_x, center_y};
-	output_file_name_len = strlen(OUTPUT_FILE_NAME);
 
 	while (!WindowShouldClose()) {
 		handle_input();
