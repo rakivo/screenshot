@@ -75,6 +75,9 @@
 #define RESIZE_RING_SEGMENTS 25
 #define RESIZE_RING_COLOR ((Color) {0, 170, 47, 255})
 
+#define BRUSH_RADIUS 3.0f
+#define BRUSH_COLOR RED
+
 #define GLSL_VERSION 300
 
 #define XSCREENSHOTS \
@@ -156,6 +159,8 @@ static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
 static uint8_t *original_image_data = NULL;
 
+static RenderTexture2D canvas = {0};
+
 static bool immediate_screenshot_and_exit = false;
 #define IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG "screenshot"
 
@@ -172,10 +177,18 @@ INLINE static void init_raylib(void)
 
 INLINE static void deinit_raylib(void)
 {
+	UnloadRenderTexture(canvas);
 	CloseWindow();
 }
 
-INLINE void fill_image(Image *image,
+INLINE static void clear_canvas(void)
+{
+	BeginTextureMode(canvas);
+	ClearBackground(BLANK);
+	EndTextureMode();
+}
+
+INLINE static void fill_image(Image *image,
 											 int w, int h,
 											 int fmt,
 											 void *data)
@@ -187,12 +200,12 @@ INLINE void fill_image(Image *image,
 	image->data = data;
 }
 
-INLINE u8 darken_channel(u8 c)
+INLINE static u8 darken_channel(u8 c)
 {
 	return MIN(0xFF, MAX(0, c*DARKEN_FACTOR));
 }
 
-void capture_screen(Window root, XWindowAttributes gwa)
+static void capture_screen(Window root, XWindowAttributes gwa)
 {
 	XImage *ximage = XGetImage(xdisplay,
 														 root,
@@ -245,7 +258,7 @@ void capture_screen(Window root, XWindowAttributes gwa)
 }
 
 // Stolen from: <https://github.com/NSinecode/Raylib-Drawing-texture-in-circle/blob/master/CircleTextureDrawing.cpp>
-void DrawCollisionTextureCircle(Texture2D texture,
+static void DrawCollisionTextureCircle(Texture2D texture,
 																Vector2 pos,
 																Vector2 circle_center,
 																float radius,
@@ -295,7 +308,7 @@ INLINE static void stop_resizing(void)
 	resizing_what = SELECTION_POISONED;
 }
 
-INLINE float clamp(float v, float min, float max)
+INLINE static float clamp(float v, float min, float max)
 {
 	float ret = v < min ? min : v;
 	if (ret > max) ret = max;
@@ -311,6 +324,8 @@ INLINE static whxy_t get_selection_data(void)
 		.y = fminf(selection_start.y, selection_end.y)
 	};
 }
+
+#define get_file_path(...) get_file_path_(__VA_ARGS__, 0)
 
 // add _<number> at the end if needed to prevent overwriting
 char *get_file_path_(char *file_path, u64 rec_count)
@@ -332,8 +347,6 @@ char *get_file_path_(char *file_path, u64 rec_count)
 	return file_path;
 }
 
-#define get_file_path(...) get_file_path_(__VA_ARGS__, 0)
-
 INLINE static void save_fullscreen(void)
 {
 	const char *file_path = get_file_path(OUTPUT_FILE_NAME
@@ -346,7 +359,7 @@ INLINE static void save_fullscreen(void)
 								 sizeof(RGB)*gwa.width);
 }
 
-INLINE void save_image_data(uint8_t *data, int w, int h)
+INLINE static void save_image_data(uint8_t *data, int w, int h)
 {
 	const char *file_path = get_file_path(OUTPUT_FILE_NAME
 																				OUTPUT_FILE_EXTENSION);
@@ -357,14 +370,14 @@ INLINE void save_image_data(uint8_t *data, int w, int h)
 								 sizeof(RGB)*w);
 }
 
-INLINE i32 wrap(i32 x, i32 max)
+INLINE static i32 wrap(i32 x, i32 max)
 {
 	x %= max;
 	if (x < 0) x += max;
 	return x;
 }
 
-u8 *crop_image(const u8 *img_data,
+INLINE static u8 *crop_image(const u8 *img_data,
 							 i32 img_w, i32 img_h,
 							 i32 w, i32 h,
 							 i32 x, i32 y)
@@ -383,11 +396,11 @@ u8 *crop_image(const u8 *img_data,
 	return data;
 }
 
-void get_selection_corners(whxy_t whxy,
-													 Vector2 *upper_left,
-													 Vector2 *upper_right,
-													 Vector2 *bottom_left,
-													 Vector2 *bottom_right)
+INLINE static void get_selection_corners(whxy_t whxy,
+																				 Vector2 *upper_left,
+																				 Vector2 *upper_right,
+																				 Vector2 *bottom_left,
+																				 Vector2 *bottom_right)
 {
 	WHXY_UNPACK
 
@@ -404,7 +417,7 @@ void get_selection_corners(whxy_t whxy,
 	bottom_right->y = y + h;
 }
 
-bool selection_check_collisions(Vector2 mouse_pos)
+INLINE static bool selection_check_collisions(Vector2 mouse_pos)
 {
 	const whxy_t whxy = get_selection_data();
 	WHXY_UNPACK
@@ -419,7 +432,7 @@ bool selection_check_collisions(Vector2 mouse_pos)
 	return CheckCollisionPointRec(mouse_pos, rec);
 }
 
-u8 selection_check_corner_collisions(Vector2 mouse_pos)
+static u8 selection_check_corner_collisions(Vector2 mouse_pos)
 {
 	Vector2 up_l, up_r, bot_l, bot_r = {0};
 	get_selection_corners(get_selection_data(),
@@ -445,18 +458,17 @@ u8 selection_check_corner_collisions(Vector2 mouse_pos)
 	return SELECTION_POISONED;
 }
 
-INLINE Vector2 Vector2Value(float value)
+INLINE static Vector2 Vector2Value(float value)
 {
 	return (Vector2) {value, value};
 }
 
-INLINE Vector2 Vector2DivideValue(Vector2 v, float div)
+INLINE static Vector2 Vector2DivideValue(Vector2 v, float div)
 {
-  Vector2 result = { v.x / div, v.y / div };
-	return result;
+	return (Vector2) { v.x / div, v.y / div };
 }
 
-void handle_input(void)
+static void handle_input(void)
 {
 	const float wheel_move = GetMouseWheelMove();
 	const Vector2 mouse_pos = GetMousePosition();
@@ -522,6 +534,21 @@ void handle_input(void)
 		}
 	}
 
+	if (!alt_mode && !resize_mode && !pan_mode && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+		BeginTextureMode(canvas);
+		{
+			const int nsteps = (int) Vector2Distance(dmouse_pos, mouse_pos);
+			for (int step = 0; step < nsteps; step++) {
+				const Vector2 ipos = Vector2Lerp(dmouse_pos,
+																				 mouse_pos,
+																				 (float) step / nsteps);
+
+				DrawCircle((int) ipos.x, (int) ipos.y, BRUSH_RADIUS, BRUSH_COLOR);
+			}
+		}
+		EndTextureMode();
+	}
+
 	if (IsKeyPressed(KEY_ESCAPE)) {
 		if (selection_mode) {
 			stop_resizing();
@@ -556,6 +583,10 @@ void handle_input(void)
 		} else {
 			save_fullscreen();
 		}
+	}
+
+	else if (IsKeyPressed(KEY_C)) {
+		clear_canvas();
 	}
 
 	if (resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
@@ -619,7 +650,7 @@ void handle_input(void)
 	dmouse_pos = cur_pos;
 }
 
-void draw_selection(void)
+static void draw_selection(void)
 {
 	if (selection_start.x == SELECTION_UNINITIALIZED) return;
 	DrawTextureEx(darker_screenshot_texture,
@@ -684,6 +715,24 @@ void draw_selection(void)
 					 RESIZE_RING_COLOR);
 }
 
+static void draw_canvas(void)
+{
+	Rectangle src_rect = {
+		0, 0,
+		(float) canvas.texture.width,
+		(float) -canvas.texture.height
+	};
+
+	Rectangle dst_rec = {
+		0, 0,
+		(float) GetScreenWidth(),
+		(float) GetScreenHeight()
+	};
+
+	Vector2 origin = {0};
+	DrawTexturePro(canvas.texture, src_rect, dst_rec, origin, 0.0f, WHITE);
+}
+
 INLINE static void preserve_original_image_data(void)
 {
 	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
@@ -724,12 +773,16 @@ i32 main(int argc, char *argv[])
 
 	init_raylib();
 
+	canvas = LoadRenderTexture(gwa.width, gwa.height);
+	clear_canvas();
+
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
 
 	while (!WindowShouldClose()) {
 		handle_input();
 		BeginDrawing();
+		{
 			ClearBackground(BACKGROUND_COLOR);
 			if (selection_mode) {
 				draw_selection();
@@ -751,7 +804,10 @@ i32 main(int argc, char *argv[])
 																	 cur_pos,
 																	 radius,
 																	 WHITE);
+
+				draw_canvas();
 			}
+		}
 		EndDrawing();
 	}
 
