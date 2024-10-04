@@ -140,7 +140,7 @@ static float zoom = STARTING_ZOOM;
 static u32 radius = STARTING_RADIUS;
 
 static bool pan_mode, alt_mode, selection_mode, resize_mode;
-static bool resizing_now = false;
+static bool resizing_now, drawing_now = false;
 static u8 resizing_what = SELECTION_POISONED;
 
 #define SELECTION_UNINITIALIZED 0.0f
@@ -561,21 +561,35 @@ static void handle_input(void)
 		}
 	}
 
-	if ((!alt_mode || (resize_mode && !resizing_now))
-	&& IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-	{
-		BeginTextureMode(canvas);
-		{
-			const int nsteps = (int) Vector2Distance(dmouse_pos, mouse_pos);
-			for (int step = 0; step < nsteps; step++) {
-				const Vector2 ipos = Vector2Lerp(dmouse_pos,
-																				 mouse_pos,
-																				 (float) step / nsteps);
-
-				DrawCircle((int) ipos.x, (int) ipos.y, BRUSH_RADIUS, BRUSH_COLOR);
-			}
+	if (!drawing_now && resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+		const u8 corner = selection_check_corner_collisions(mouse_pos);
+		if (corner != SELECTION_POISONED) {
+			resizing_now = true;
+			resizing_what = corner;
+		} else if (alt_mode && selection_check_collisions(mouse_pos)) {
+			resizing_now = true;
+			resizing_what = SELECTION_INSIDE;
 		}
-		EndTextureMode();
+	}
+
+	if (!alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
+		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+			drawing_now = true;
+			BeginTextureMode(canvas);
+			{
+				const int nsteps = (int) Vector2Distance(dmouse_pos, mouse_pos);
+				for (int step = 0; step < nsteps; step++) {
+					const Vector2 ipos = Vector2Lerp(dmouse_pos,
+																					 mouse_pos,
+																					 (float) step / nsteps);
+	
+					DrawCircle((int) ipos.x, (int) ipos.y, BRUSH_RADIUS, BRUSH_COLOR);
+				}
+			}
+			EndTextureMode();
+		} else if (drawing_now) {
+			drawing_now = false;
+		}
 	}
 
 	if (IsKeyPressed(KEY_ESCAPE)) {
@@ -636,17 +650,6 @@ static void handle_input(void)
 
 	else if (IsKeyPressed(KEY_C)) {
 		clear_canvas();
-	}
-
-	if (resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-		const u8 corner = selection_check_corner_collisions(mouse_pos);
-		if (corner != SELECTION_POISONED) {
-			resizing_now = true;
-			resizing_what = corner;
-		} else if (alt_mode && selection_check_collisions(mouse_pos)) {
-			resizing_now = true;
-			resizing_what = SELECTION_INSIDE;
-		}
 	}
 
 	if (wheel_move != 0) {
