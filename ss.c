@@ -1,4 +1,6 @@
 #include <time.h>
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,12 +23,18 @@
 
 #define DEBUG 0
 
+#define streq(str1, str2) (strcmp(str1, str2) == 0)
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 #define panic(...) do { \
 	eprintf(__VA_ARGS__); \
 	deinit_raylib(); \
 	exit(1); \
 } while (0)
+
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+#define UNUSED __attribute__((unused))
 
 #define WHXY_UNPACK \
 	float w = whxy.w; \
@@ -42,9 +50,6 @@
 
 #define center_x (GetScreenWidth() / 2)
 #define center_y (GetScreenHeight() / 2)
-
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #define BACKGROUND_COLOR ((Color) {10, 10, 10, 255})
 
@@ -75,9 +80,6 @@
 #define RESIZE_RING_SEGMENTS 25
 #define RESIZE_RING_COLOR ((Color) {0, 170, 47, 255})
 
-#define BRUSH_RADIUS 3.0f
-#define BRUSH_COLOR RED
-
 #define GLSL_VERSION 300
 
 #define XSCREENSHOTS \
@@ -107,8 +109,14 @@ enum {
 	SELECTION_BOTTOM_RIGHT
 };
 
+enum {
+	PASSED,
+	NOT_PASSED,
+	PASSED_WITHOUT_VALUE_UNEXPECTEDLY,
+};
+
 // Stolen from: <https://github.com/NSinecode/Raylib-Drawing-texture-in-circle/blob/master/CircleTexture.frag>
-const char* CIRCLE_SHADER = 
+const char* CIRCLE_SHADER =
 "#version 330\n"
 "in vec2 fragTexCoord;\n"
 "in vec4 fragColor;\n"
@@ -137,6 +145,12 @@ const char* CIRCLE_SHADER =
 #define OUTPUT_FILE_EXTENSION ".png"
 
 static size_t output_file_name_len = 0;
+
+#define BRUSH_COLOR RED
+#define BRUSH_RADIUS 3.0f
+
+static Color brush_color = BRUSH_COLOR;
+static float brush_radius = BRUSH_RADIUS;
 
 static float zoom = STARTING_ZOOM;
 
@@ -170,6 +184,8 @@ static RenderTexture2D canvas = {0};
 static bool immediate_screenshot_and_exit = false;
 #define IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG "screenshot"
 
+static bool raylib_initialized = false;
+
 INLINE static void init_raylib(void)
 {
 	const int m = GetCurrentMonitor();
@@ -180,13 +196,16 @@ INLINE static void init_raylib(void)
 	font = LoadFont_Font();
 	SetExitKey(0);
 	HideCursor();
+	raylib_initialized = true;
 }
 
 INLINE static void deinit_raylib(void)
 {
-	UnloadTexture(font.texture);
-	UnloadRenderTexture(canvas);
-	CloseWindow();
+	if (raylib_initialized) {
+		UnloadTexture(font.texture);
+		UnloadRenderTexture(canvas);
+		CloseWindow();
+	}
 }
 
 INLINE static void clear_canvas(void)
@@ -365,10 +384,10 @@ INLINE static uint8_t *draw_canvas_into_image(uint8_t *data, int w, int h)
 {
 	Image image = (Image) {
 		.data = data,
-    .width = w,
-    .height = h,
-    .mipmaps = screenshot.mipmaps,
-    .format = screenshot.format
+		.width = w,
+		.height = h,
+		.mipmaps = screenshot.mipmaps,
+		.format = screenshot.format
 	};
 
 	Image canvas_image = LoadImageFromTexture(canvas.texture);
@@ -387,10 +406,10 @@ INLINE static void save_fullscreen(void)
 																				OUTPUT_FILE_EXTENSION);
 	Image image = (Image) {
 		.data = original_image_data,
-    .width = screenshot.width,
-    .height = screenshot.height,
-    .mipmaps = screenshot.mipmaps,
-    .format = screenshot.format
+		.width = screenshot.width,
+		.height = screenshot.height,
+		.mipmaps = screenshot.mipmaps,
+		.format = screenshot.format
 	};
 
 	image.data = draw_canvas_into_image(image.data, image.width, image.height);
@@ -405,10 +424,10 @@ INLINE static void save_image_data(uint8_t *data, int w, int h)
 
 	Image image = (Image) {
 		.data = data,
-    .width = w,
-    .height = h,
-    .mipmaps = screenshot.mipmaps,
-    .format = screenshot.format
+		.width = w,
+		.height = h,
+		.mipmaps = screenshot.mipmaps,
+		.format = screenshot.format
 	};
 
 	ExportImage(image, file_path);
@@ -530,9 +549,9 @@ static void take_screenshot(void)
 		Image image = (Image) {
 			.data = drawn_data,
 			.width = screenshot.width,
-		  .height = screenshot.height,
-		  .mipmaps = screenshot.mipmaps,
-		  .format = screenshot.format
+			.height = screenshot.height,
+			.mipmaps = screenshot.mipmaps,
+			.format = screenshot.format
 		};
 
 		// TODO: avoid flipping the image twice, but flip canvas once
@@ -556,7 +575,7 @@ static void take_screenshot(void)
 	}
 
 	clear_canvas();
-}                
+}
 
 static void handle_input(void)
 {
@@ -645,8 +664,8 @@ static void handle_input(void)
 					const Vector2 ipos = Vector2Lerp(dmouse_pos,
 																					 mouse_pos,
 																					 (float) step / nsteps);
-	
-					DrawCircle((int) ipos.x, (int) ipos.y, BRUSH_RADIUS, BRUSH_COLOR);
+
+					DrawCircle((int) ipos.x, (int) ipos.y, brush_radius, brush_color);
 				}
 			}
 			EndTextureMode();
@@ -723,7 +742,7 @@ static void handle_input(void)
 		if (!selection_mode && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
 			selection_start = mouse_pos;
 			selection_mode = true;
- 		} else if (selection_mode && !IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+		} else if (selection_mode && !IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
 			resize_mode = true;
 		}
 	} else if (selection_mode && !resize_mode) {
@@ -868,12 +887,164 @@ INLINE static void preserve_original_image_data(void)
 				 sizeof(RGB)*screenshot.width*screenshot.height);
 }
 
-i32 main(int argc, char *argv[])
+static size_t argc;
+#define FLAG_CAP 256
+static char **argv, flag_value[FLAG_CAP];
+
+INLINE static void str_tolower(char *s)
 {
-	if (argc > 1) {
-		if (strstr(argv[1], IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG) != NULL) {
-			immediate_screenshot_and_exit = true;
+	for (char *p = s; p != NULL && *p != '\0'; *p = tolower(*p), p++);
+}
+
+// NOTE: Discards scratch buffer, be careful
+INLINE static bool streq_ignore_ascii_case(const char *s1, const char *s2)
+{
+	scratch_buffer_clear();
+
+	scratch_buffer_append(s1);
+	char *lower1 = scratch_buffer_to_string();
+	str_tolower(lower1);
+	scratch_buffer_append_char('\0');
+
+	const size_t len = scratch_buffer.len;
+
+	scratch_buffer_append(s2);
+	char *lower2 = scratch_buffer.str + len;
+	str_tolower(lower2);
+	scratch_buffer_append_char('\0');
+
+	return streq(lower1, lower2);
+}
+
+INLINE static int check_flag(char *flag, bool expect_value)
+{
+	scratch_buffer_clear();
+	scratch_buffer_append(flag);
+	char *lowerflag = scratch_buffer_copy();
+
+	for (size_t i = 1; i < argc; ++i) {
+		if (streq(lowerflag, argv[i])) {
+			if (!expect_value) return PASSED;
+
+			if (i + 1 >= argc)
+				return PASSED_WITHOUT_VALUE_UNEXPECTEDLY;
+
+			memcpy(flag_value, argv[i + 1], FLAG_CAP);
+			return PASSED;
+		} else {
+			char *pos = strchr(argv[i], '=');
+			if (pos == NULL) continue;
+
+			const size_t idx = pos - argv[i];
+			scratch_buffer_clear();
+			memcpy(scratch_buffer.str, argv[i], idx);
+			scratch_buffer.len = idx;
+			str_tolower(scratch_buffer.str);
+
+			// characters before `=`
+			char *flag_str = scratch_buffer_to_string();
+
+			if (!streq(lowerflag, flag_str)) continue;
+			if (!expect_value) return PASSED;
+
+			scratch_buffer_clear();
+			scratch_buffer_append(argv[i] + idx + 1);
+			scratch_buffer_append_char('\0');
+
+			// characters after `=`
+			char *flag_value_str = scratch_buffer_to_string();
+
+			if (flag_value_str == NULL || *flag_value_str == '\0')
+				return PASSED_WITHOUT_VALUE_UNEXPECTEDLY;
+
+			memcpy(flag_value, flag_value_str, FLAG_CAP);
+			return PASSED;
 		}
+	}
+
+	return NOT_PASSED;
+}
+
+static Color color_try_from_str(const char *str)
+{
+	if (streq_ignore_ascii_case(str, "lightgray"))				return LIGHTGRAY;
+	else if (streq_ignore_ascii_case(str, "gray"))				return GRAY;
+	else if (streq_ignore_ascii_case(str, "darkgray"))		return DARKGRAY;
+	else if (streq_ignore_ascii_case(str, "yellow"))			return YELLOW;
+	else if (streq_ignore_ascii_case(str, "gold"))				return GOLD;
+	else if (streq_ignore_ascii_case(str, "orange"))			return ORANGE;
+	else if (streq_ignore_ascii_case(str, "pink"))				return PINK;
+	else if (streq_ignore_ascii_case(str, "red"))					return RED;
+	else if (streq_ignore_ascii_case(str, "maroon"))			return MAROON;
+	else if (streq_ignore_ascii_case(str, "green"))				return GREEN;
+	else if (streq_ignore_ascii_case(str, "lime"))				return LIME;
+	else if (streq_ignore_ascii_case(str, "darkgreen"))		return DARKGREEN;
+	else if (streq_ignore_ascii_case(str, "skyblue"))			return SKYBLUE;
+	else if (streq_ignore_ascii_case(str, "blue"))				return BLUE;
+	else if (streq_ignore_ascii_case(str, "darkblue"))		return DARKBLUE;
+	else if (streq_ignore_ascii_case(str, "purple"))			return PURPLE;
+	else if (streq_ignore_ascii_case(str, "violet"))			return VIOLET;
+	else if (streq_ignore_ascii_case(str, "darkpurple"))	return DARKPURPLE;
+	else if (streq_ignore_ascii_case(str, "beige"))				return BEIGE;
+	else if (streq_ignore_ascii_case(str, "brown"))				return BROWN;
+	else if (streq_ignore_ascii_case(str, "darkbrown"))		return DARKBROWN;
+	else if (streq_ignore_ascii_case(str, "white"))				return WHITE;
+	else if (streq_ignore_ascii_case(str, "black"))				return BLACK;
+	else if (streq_ignore_ascii_case(str, "magenta"))			return MAGENTA;
+	else if (streq_ignore_ascii_case(str, "raywhite"))		return RAYWHITE;
+	else																									return BLANK;
+}
+
+static void handle_flags(void)
+{
+	int code;
+
+	code = check_flag(IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG, false);
+	if (code == PASSED) {
+		immediate_screenshot_and_exit = true;
+	}
+
+	code = check_flag("brush_color", true);
+	if (code == PASSED_WITHOUT_VALUE_UNEXPECTEDLY) {
+		panic("expected `brush_color` flag to have a value\n");
+	} else if (code == PASSED) {
+		const Color new_brush_color = color_try_from_str(flag_value);
+		if (memcmp(&new_brush_color, &BLANK, sizeof(Color)) == 0) {
+			panic("unexpected color: %s\n", flag_value);
+		}
+
+		brush_color = new_brush_color;
+	}
+
+	code = check_flag("brush_radius", true);
+	if (code == PASSED_WITHOUT_VALUE_UNEXPECTEDLY) {
+		panic("expected `brush_radius` flag to have a value\n");
+	} else if (code == PASSED) {
+		char *end;
+		const float new_brush_radius = strtof(flag_value, &end);
+		if (end == flag_value || *end != '\0') {
+			panic("failed to parse `%s` to float\n", flag_value);
+		} else if (errno == ERANGE) {
+			if (new_brush_radius == HUGE_VAL) {
+				panic("overflew when tried to parse `%s` to float\n", flag_value);
+			} else {
+				panic("underflew when tried to parse `%s` to float\n", flag_value);
+			}
+		}
+
+		brush_radius = new_brush_radius;
+	}
+}
+
+i32 main(int argc_, char **argv_)
+{
+	argc = (size_t) argc_;
+	argv = argv_;
+
+	memory_init(1);
+
+	if (argc > 1) {
+		handle_flags();
 	}
 
 	xdisplay = XOpenDisplay(NULL);
@@ -949,6 +1120,7 @@ i32 main(int argc, char *argv[])
 #undef X
 
 	deinit_raylib();
+	memory_release();
 	XCloseDisplay(xdisplay);
 
 	return 0;
