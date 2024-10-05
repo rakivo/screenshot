@@ -1,3 +1,4 @@
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,8 @@
 
 #define SCRATCH_BUFFER_IMPLEMENTATION
 #include "scratch_buffer.h"
+
+#include "font.h"
 
 #define DEBUG 0
 
@@ -139,9 +142,15 @@ static float zoom = STARTING_ZOOM;
 
 static u32 radius = STARTING_RADIUS;
 
-static bool pan_mode, alt_mode, selection_mode, resize_mode;
 static bool resizing_now, drawing_now = false;
 static u8 resizing_what = SELECTION_POISONED;
+
+static bool timer_mode = false;
+static time_t timer_start = 0;
+
+static Font font = {0};
+
+static bool pan_mode, alt_mode, selection_mode, resize_mode = false;
 
 #define SELECTION_UNINITIALIZED 0.0f
 static Vector2 selection_start, selection_end = {SELECTION_UNINITIALIZED, SELECTION_UNINITIALIZED};
@@ -168,12 +177,14 @@ INLINE static void init_raylib(void)
 	SetTraceLogLevel(LOG_NONE);
 	if (!DEBUG) SetConfigFlags(WINDOW_FLAGS);
 	InitWindow(GetMonitorWidth(m), GetMonitorHeight(m), "ss");
+	font = LoadFont_Font();
 	SetExitKey(0);
 	HideCursor();
 }
 
 INLINE static void deinit_raylib(void)
 {
+	UnloadTexture(font.texture);
 	UnloadRenderTexture(canvas);
 	CloseWindow();
 }
@@ -303,6 +314,12 @@ INLINE static void stop_resizing(void)
 {
 	resizing_now = false;
 	resizing_what = SELECTION_POISONED;
+}
+
+INLINE static void stop_timer_mode(void)
+{
+	timer_mode = false;
+	timer_start = -1;
 }
 
 INLINE static float clamp(float v, float min, float max)
@@ -444,7 +461,7 @@ INLINE static void get_selection_corners(whxy_t whxy,
 	bottom_right->y = y + h;
 }
 
-INLINE static bool selection_check_collisions(Vector2 mouse_pos)
+static bool selection_check_collisions(Vector2 mouse_pos)
 {
 	const whxy_t whxy = get_selection_data();
 	WHXY_UNPACK
@@ -494,6 +511,52 @@ INLINE static Vector2 Vector2DivideValue(Vector2 v, float div)
 {
 	return (Vector2) { v.x / div, v.y / div };
 }
+
+static void take_screenshot(void)
+{
+	if (selection_mode) {
+		const whxy_t whxy = get_selection_data();
+
+		WHXY_UNPACK_I32
+
+		x = fabsf(x - image_pos.x) / zoom;
+		y = fabsf(y - image_pos.y) / zoom;
+		w /= zoom;
+		h /= zoom;
+
+		u8 *drawn_data = (u8 *) malloc(screenshot.width*screenshot.height*sizeof(RGB));
+		memcpy(drawn_data, original_image_data, screenshot.width*screenshot.height*sizeof(RGB));
+
+		Image image = (Image) {
+			.data = drawn_data,
+			.width = screenshot.width,
+		  .height = screenshot.height,
+		  .mipmaps = screenshot.mipmaps,
+		  .format = screenshot.format
+		};
+
+		// TODO: avoid flipping the image twice, but flip canvas once
+		ImageFlipVertical(&image);
+
+		image.data = draw_canvas_into_image(image.data, image.width, image.height);
+
+		ImageFlipVertical(&image);
+
+		u8 *data = crop_image(image.data,
+													screenshot.width,
+													screenshot.height,
+													w, h, x, y);
+
+		stop_selection_mode();
+		save_image_data(data, w, h);
+
+		free(data);
+	} else {
+		save_fullscreen();
+	}
+
+	clear_canvas();
+}                
 
 static void handle_input(void)
 {
@@ -593,63 +656,31 @@ static void handle_input(void)
 	}
 
 	if (IsKeyPressed(KEY_ESCAPE)) {
+		stop_timer_mode();
 		if (selection_mode) {
 			stop_resizing();
 			stop_selection_mode();
 		} else {
+			clear_canvas();
 			zoom = STARTING_ZOOM;
 			radius = STARTING_RADIUS;
 			image_pos = Vector2Zero();
-			cur_pos = (Vector2) {center_x, center_y};
 			SetMousePosition(center_x, center_y);
+			cur_pos = (Vector2) {center_x, center_y};
 		}
 	}
 
 	else if (IsKeyPressed(KEY_ENTER)) {
-		if (selection_mode) {
-			const whxy_t whxy = get_selection_data();
-
-			WHXY_UNPACK_I32
-
-			x = fabsf(x - image_pos.x) / zoom;
-			y = fabsf(y - image_pos.y) / zoom;
-			w /= zoom;
-			h /= zoom;
-
-			u8 *drawn_data = (u8 *) malloc(screenshot.width*screenshot.height*sizeof(RGB));
-			memcpy(drawn_data, original_image_data, screenshot.width*screenshot.height*sizeof(RGB));
-
-			Image image = (Image) {
-				.data = drawn_data,
-				.width = screenshot.width,
-			  .height = screenshot.height,
-			  .mipmaps = screenshot.mipmaps,
-			  .format = screenshot.format
-			};
-
-			// TODO: avoid flipping the image twice, but flip canvas once
-			ImageFlipVertical(&image);
-
-			image.data = draw_canvas_into_image(image.data, image.width, image.height);
-
-			ImageFlipVertical(&image);
-
-			u8 *data = crop_image(image.data,
-														screenshot.width,
-														screenshot.height,
-														w, h, x, y);
-
-			stop_selection_mode();
-			save_image_data(data, w, h);
-
-			free(data);
-		} else {
-			save_fullscreen();
-		}
+		take_screenshot();
 	}
 
 	else if (IsKeyPressed(KEY_C)) {
 		clear_canvas();
+	}
+
+	else if (IsKeyPressed(KEY_T)) {
+		timer_mode = true;
+		timer_start = clock();
 	}
 
 	if (wheel_move != 0) {
@@ -785,6 +816,47 @@ static void draw_canvas(void)
 	DrawTexturePro(canvas.texture, src_rect, dst_rec, origin, 0.0f, WHITE);
 }
 
+static void handle_timer_mode(void)
+{
+	const time_t now = clock();
+	const double elapsed = (double) (now - timer_start) / CLOCKS_PER_SEC;
+	if (elapsed >= 1.0) {
+		stop_timer_mode();
+		take_screenshot();
+		return;
+	}
+
+	scratch_buffer_clear();
+	scratch_buffer_printf("screenshot will be taken "
+												"in %.2lf seconds..",
+												10.0f-elapsed*10.0f);
+
+	char *text = scratch_buffer_to_string();
+
+	const float spacing = 2.0f;
+	const float font_size = 20.0f;
+
+	const Vector2 size = MeasureTextEx(font, text, font_size, spacing);
+
+	const float x = GetScreenWidth()*0.97 - size.x;
+	const float y = GetScreenHeight()*0.97 - size.y;
+
+	const float pad = 50.0f;
+
+	DrawRectangle(x - pad/2,
+								y - pad/2,
+								size.x + pad,
+								size.y + pad,
+								(Color){0, 0, 0, 150});
+
+	DrawTextEx(font,
+						 text,
+						 (Vector2) {x, y},
+						 font_size,
+						 spacing,
+						 WHITE);
+}
+
 INLINE static void preserve_original_image_data(void)
 {
 	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
@@ -858,7 +930,12 @@ i32 main(int argc, char *argv[])
 																	 radius,
 																	 WHITE);
 			}
+
 			draw_canvas();
+
+			if (timer_mode) {
+				handle_timer_mode();
+			}
 		}
 		EndDrawing();
 	}
