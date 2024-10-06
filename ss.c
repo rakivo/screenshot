@@ -63,6 +63,9 @@
 #define SCROLL_SENSITIVITY 350.0f
 #define BOOSTED_SCROLL_SENSITIVITY (SCROLL_SENSITIVITY*3)
 
+#define BRUSH_RADIUS_SENSITIVITY 1.0f
+#define BOOSTED_BRUSH_RADIUS_SENSITIVITY 3.0f
+
 #define ZOOM_SPEED 1.2f
 #define BOOSTED_ZOOM_SPEED 2.2f
 #define MIN_ZOOM 0.7f
@@ -450,13 +453,6 @@ INLINE static void stop_timer_mode(void)
 {
 	timer_mode = false;
 	timer_start = -1;
-}
-
-INLINE static float clamp(float v, float min, float max)
-{
-	float ret = v < min ? min : v;
-	if (ret > max) ret = max;
-	return ret;
 }
 
 INLINE static whxy_t get_selection_data(void)
@@ -864,12 +860,19 @@ static void handle_input(void)
 		if (tile_idx >= 0) {
 			color_selector_mode_ending = GetTime();
 			brush_color = colors[tile_idx];
-			stop_color_selector_mode();
 		}
+		stop_color_selector_mode();
 	}
 
 	if (wheel_move != 0) {
-		if(IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
+		if (color_selector_mode) {
+			const float sens = IsKeyDown(KEY_LEFT_SHIFT) ?
+				BOOSTED_BRUSH_RADIUS_SENSITIVITY :
+				BRUSH_RADIUS_SENSITIVITY;
+
+			const float new_brush_radius = brush_radius + wheel_move*sens;
+			brush_radius = Clamp(new_brush_radius, 1.0f, 50.0f);
+		} else if (IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
 			float offset = -SCROLL_SPEED*wheel_move;
 
 			if (offset <= 0) {
@@ -877,7 +880,10 @@ static void handle_input(void)
 			}
 
 			const float sine = sin(offset);
-			const float sens = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_SCROLL_SENSITIVITY : SCROLL_SENSITIVITY;
+			const float sens = IsKeyDown(KEY_LEFT_SHIFT) ?
+				BOOSTED_SCROLL_SENSITIVITY :
+				SCROLL_SENSITIVITY;
+
 			const float tradius = MIN(MIN(gwa.width, gwa.height), MAX(15.0, radius + sine*sens));
 			radius += (tradius - radius)*SMOOTHING_FACTOR;
 		} else {
@@ -885,7 +891,7 @@ static void handle_input(void)
 
 			const float zs = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_ZOOM_SPEED : ZOOM_SPEED;
 			zoom += wheel_move*0.1f*zs;
-			zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
+			zoom = Clamp(zoom, MIN_ZOOM, MAX_ZOOM);
 
 			image_pos = Vector2Subtract(mouse_pos,
 																	Vector2Multiply(offset, Vector2Value(zoom)));
@@ -1057,6 +1063,10 @@ static void handle_color_selector_mode(void)
 			.width = COLOR_PREVIEW_SIZE.x, .height = COLOR_PREVIEW_SIZE.y
 		}, 1.0f, BLACK);
 	}
+
+	DrawCircleV(GetMousePosition(),
+							brush_radius,
+							brush_color);
 }
 
 INLINE static void preserve_original_image_data(void)
