@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <strings.h>
 #include <stdbool.h>
 
 #include <raylib.h>
@@ -20,10 +21,12 @@
 #include "scratch_buffer.h"
 
 #include "font.h"
+#include "hash.c"
 
 #define DEBUG 0
 
 #define streq(str1, str2) (strcmp(str1, str2) == 0)
+#define strcaseeq(str1, str2) (strcasecmp(str1, str2) == 0)
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 #define panic(...) do { \
 	eprintf(__VA_ARGS__); \
@@ -166,8 +169,13 @@ static Font font = {0};
 
 static bool pan_mode, alt_mode, selection_mode, resize_mode = false;
 
-#define SELECTION_UNINITIALIZED 0.0f
-static Vector2 selection_start, selection_end = {SELECTION_UNINITIALIZED, SELECTION_UNINITIALIZED};
+#define DOUBLE_UNINITIALIZED 0.0f
+
+static bool color_selector_mode = false;
+static float color_selector_mode_ending = DOUBLE_UNINITIALIZED;
+static Vector2 color_selector_entered_position = {DOUBLE_UNINITIALIZED, DOUBLE_UNINITIALIZED};
+
+static Vector2 selection_start, selection_end = {DOUBLE_UNINITIALIZED, DOUBLE_UNINITIALIZED};
 
 static Vector2 cur_pos, image_pos, dmouse_pos = {0};
 
@@ -183,6 +191,100 @@ static RenderTexture2D canvas = {0};
 
 static bool immediate_screenshot_and_exit = false;
 #define IMMEDIATE_SCREENSHOT_AND_EXIT_FLAG "screenshot"
+
+static const Color colors[] = {
+	GRAY,
+	DARKGRAY,
+	YELLOW,
+	GOLD,
+	ORANGE,
+	PINK,
+	RED,
+	MAROON,
+	GREEN,
+	LIME,
+	DARKGREEN,
+	SKYBLUE,
+	BLUE,
+	DARKBLUE,
+	PURPLE,
+	VIOLET,
+	DARKPURPLE,
+	BEIGE,
+	BROWN,
+	DARKBROWN,
+	WHITE,
+	BLACK,
+	MAGENTA,
+	RAYWHITE
+};
+
+#define COLORS_COUNT (sizeof(colors) / sizeof(Color))
+
+#define COLORS_PADDING 5.0f
+#define COLOR_PREVIEW_SIZE ((Vector2) {27.4f, 40.0f})
+#define COLOR_SELECTOR_WINDOW_SIZE ((Vector2) {200.0f, 185.5f})
+#define COLOR_SELECTOR_WINDOW_CURSOR_PADDING ((Vector2) {50.0f, -150.0f})
+
+// Precomputed relative positions of preview-tiles inside of the
+// color selector window when you press B.
+static Vector2 COLOR_POSITIONS[COLORS_COUNT] = {
+	{5.0, 5.0},
+	{37.4, 5.0},
+	{69.8, 5.0},
+	{102.2, 5.0},
+	{134.6, 5.0},
+	{167.0, 5.0},
+	{5.0, 50.0},
+	{37.4, 50.0},
+	{69.8, 50.0},
+	{102.2, 50.0},
+	{134.6, 50.0},
+	{167.0, 50.0},
+	{5.0, 95.0},
+	{37.4, 95.0},
+	{69.8, 95.0},
+	{102.2, 95.0},
+	{134.6, 95.0},
+	{167.0, 95.0},
+	{5.0, 140.0},
+	{37.4, 140.0},
+	{69.8, 140.0},
+	{102.2, 140.0},
+	{134.6, 140.0},
+	{167.0, 140.0},
+};
+
+// Compile time hash table 'char *color_name -> Color color',
+// with precomputed hashes using `gperf`
+static const Color color_map[62] = {
+	[39]	= LIGHTGRAY,
+	[34]	= GRAY,
+	[18]	= DARKGRAY,
+	[61]	= YELLOW,
+	[14]	= GOLD,
+	[26]	= ORANGE,
+	[4]		= PINK,
+	[3]		= RED,
+	[6]		= MAROON,
+	[25]	= GREEN,
+	[29]	= LIME,
+	[19]	= DARKGREEN,
+	[37]	= SKYBLUE,
+	[9]		= BLUE,
+	[23]	= DARKBLUE,
+	[31]	= PURPLE,
+	[36]	= VIOLET,
+	[20]	= DARKPURPLE,
+	[10]	= BEIGE,
+	[35]	= BROWN,
+	[24]	= DARKBROWN,
+	[15]	= WHITE,
+	[40]	= BLACK,
+	[30]	= BLANK,
+	[27]	= MAGENTA,
+	[13]	= RAYWHITE
+};
 
 static bool raylib_initialized = false;
 
@@ -318,15 +420,24 @@ static void DrawCollisionTextureCircle(Texture2D texture,
 INLINE static void stop_selection_mode(void)
 {
 	memset(&selection_start,
-				 SELECTION_UNINITIALIZED,
+				 DOUBLE_UNINITIALIZED,
 				 sizeof(selection_start));
 
 	memset(&selection_end,
-				 SELECTION_UNINITIALIZED,
+				 DOUBLE_UNINITIALIZED,
 				 sizeof(selection_end));
 
 	selection_mode = false;
 	resize_mode = false;
+}
+
+INLINE static void stop_color_selector_mode(void)
+{
+	memset(&color_selector_entered_position,
+				 DOUBLE_UNINITIALIZED,
+				 sizeof(color_selector_entered_position));
+
+	color_selector_mode = false;
 }
 
 INLINE static void stop_resizing(void)
@@ -577,18 +688,44 @@ static void take_screenshot(void)
 	clear_canvas();
 }
 
+static i32 check_color_selector_collisions(Vector2 mouse_pos)
+{
+	const Vector2 rpos = Vector2Add(color_selector_entered_position,
+																	COLOR_SELECTOR_WINDOW_CURSOR_PADDING);
+
+	for (size_t color_idx = 0; color_idx < COLORS_COUNT; color_idx++) {
+		const Vector2 tile_pos = Vector2Add(rpos, COLOR_POSITIONS[color_idx]);
+		const Rectangle tile_rect = (Rectangle) {
+			.x = tile_pos.x, .y = tile_pos.y,
+			.width = COLOR_PREVIEW_SIZE.x, .height = COLOR_PREVIEW_SIZE.y
+		};
+
+		if (CheckCollisionPointRec(mouse_pos, tile_rect)) {
+			return (i32) color_idx;
+		}
+	}
+
+	return -1;
+}
+
 static void handle_input(void)
 {
 	const float wheel_move = GetMouseWheelMove();
 	const Vector2 mouse_pos = GetMousePosition();
 
-	cur_pos = mouse_pos;
+	if (!color_selector_mode) {
+		cur_pos = mouse_pos;
+	}
+
 	alt_mode = IsKeyDown(KEY_LEFT_ALT);
 
-	if (resizing_now) {
+	if (color_selector_mode) {
+		ShowCursor();
+		SetMouseCursor(MOUSE_CURSOR_ARROW);
+	} else if (resizing_now) {
 		ShowCursor();
 		SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
-	} else if (alt_mode || resize_mode) {
+	} else if (alt_mode || resize_mode || drawing_now) {
 		ShowCursor();
 		SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
 	} else {
@@ -597,6 +734,15 @@ static void handle_input(void)
 
 	if (selection_mode && !resize_mode) {
 		selection_end = cur_pos;
+	}
+
+	// Wait quarter of a second to not draw accidentally
+	if (color_selector_mode_ending != DOUBLE_UNINITIALIZED) {
+		if (GetTime() - color_selector_mode_ending > 0.25) {
+			color_selector_mode_ending = DOUBLE_UNINITIALIZED;
+		} else {
+			return;
+		}
 	}
 
 	if (resizing_now) {
@@ -654,7 +800,7 @@ static void handle_input(void)
 		}
 	}
 
-	if (!alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
+	if (!color_selector_mode && !alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
 		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 			drawing_now = true;
 			BeginTextureMode(canvas);
@@ -676,7 +822,9 @@ static void handle_input(void)
 
 	if (IsKeyPressed(KEY_ESCAPE)) {
 		stop_timer_mode();
-		if (selection_mode) {
+		if (color_selector_mode) {
+			stop_color_selector_mode();
+		} else if (selection_mode) {
 			stop_resizing();
 			stop_selection_mode();
 		} else {
@@ -700,6 +848,24 @@ static void handle_input(void)
 	else if (IsKeyPressed(KEY_T)) {
 		timer_mode = true;
 		timer_start = clock();
+	}
+
+	else if (IsKeyPressed(KEY_B)) {
+		if (!color_selector_mode) {
+			color_selector_mode = true;
+			color_selector_entered_position = mouse_pos;
+		} else {
+			stop_color_selector_mode();
+		}
+	}
+
+	if (color_selector_mode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+		const i32 tile_idx = check_color_selector_collisions(mouse_pos);
+		if (tile_idx >= 0) {
+			color_selector_mode_ending = GetTime();
+			brush_color = colors[tile_idx];
+			stop_color_selector_mode();
+		}
 	}
 
 	if (wheel_move != 0) {
@@ -754,7 +920,7 @@ static void handle_input(void)
 
 static void draw_selection(void)
 {
-	if (selection_start.x == SELECTION_UNINITIALIZED) return;
+	if (selection_start.x == DOUBLE_UNINITIALIZED) return;
 	DrawTextureEx(darker_screenshot_texture,
 								image_pos,
 								0,
@@ -876,6 +1042,23 @@ static void handle_timer_mode(void)
 						 WHITE);
 }
 
+static void handle_color_selector_mode(void)
+{
+	const Vector2 rpos = Vector2Add(color_selector_entered_position,
+																	COLOR_SELECTOR_WINDOW_CURSOR_PADDING);
+
+	DrawRectangleV(rpos, COLOR_SELECTOR_WINDOW_SIZE, WHITE);
+
+	for (size_t color_idx = 0; color_idx < COLORS_COUNT; color_idx++) {
+		const Vector2 draw_pos = Vector2Add(rpos, COLOR_POSITIONS[color_idx]);
+		DrawRectangleV(draw_pos, COLOR_PREVIEW_SIZE, colors[color_idx]);
+		DrawRectangleLinesEx((Rectangle) {
+			.x = draw_pos.x, .y = draw_pos.y,
+			.width = COLOR_PREVIEW_SIZE.x, .height = COLOR_PREVIEW_SIZE.y
+		}, 1.0f, BLACK);
+	}
+}
+
 INLINE static void preserve_original_image_data(void)
 {
 	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
@@ -889,32 +1072,7 @@ INLINE static void preserve_original_image_data(void)
 
 static size_t argc;
 #define FLAG_CAP 256
-static char **argv, flag_value[FLAG_CAP];
-
-INLINE static void str_tolower(char *s)
-{
-	for (char *p = s; p != NULL && *p != '\0'; *p = tolower(*p), p++);
-}
-
-// NOTE: Discards scratch buffer, be careful
-INLINE static bool streq_ignore_ascii_case(const char *s1, const char *s2)
-{
-	scratch_buffer_clear();
-
-	scratch_buffer_append(s1);
-	char *lower1 = scratch_buffer_to_string();
-	str_tolower(lower1);
-	scratch_buffer_append_char('\0');
-
-	const size_t len = scratch_buffer.len;
-
-	scratch_buffer_append(s2);
-	char *lower2 = scratch_buffer.str + len;
-	str_tolower(lower2);
-	scratch_buffer_append_char('\0');
-
-	return streq(lower1, lower2);
-}
+static char **argv, flag_value[FLAG_CAP + 1];
 
 INLINE static int check_flag(char *flag, bool expect_value)
 {
@@ -923,7 +1081,7 @@ INLINE static int check_flag(char *flag, bool expect_value)
 	char *lowerflag = scratch_buffer_copy();
 
 	for (size_t i = 1; i < argc; ++i) {
-		if (streq(lowerflag, argv[i])) {
+		if (strcaseeq(lowerflag, argv[i])) {
 			if (!expect_value) return PASSED;
 
 			if (i + 1 >= argc)
@@ -939,12 +1097,11 @@ INLINE static int check_flag(char *flag, bool expect_value)
 			scratch_buffer_clear();
 			memcpy(scratch_buffer.str, argv[i], idx);
 			scratch_buffer.len = idx;
-			str_tolower(scratch_buffer.str);
+			scratch_buffer_append_char('\0');
 
-			// characters before `=`
-			char *flag_str = scratch_buffer_to_string();
+			const char *flag_str = TextToLower(scratch_buffer.str);
 
-			if (!streq(lowerflag, flag_str)) continue;
+			if (!strcaseeq(lowerflag, flag_str)) continue;
 			if (!expect_value) return PASSED;
 
 			scratch_buffer_clear();
@@ -965,34 +1122,37 @@ INLINE static int check_flag(char *flag, bool expect_value)
 	return NOT_PASSED;
 }
 
-static Color color_try_from_str(const char *str)
+INLINE static Color color_try_from_str(const char *str)
 {
-	if (streq_ignore_ascii_case(str, "lightgray"))				return LIGHTGRAY;
-	else if (streq_ignore_ascii_case(str, "gray"))				return GRAY;
-	else if (streq_ignore_ascii_case(str, "darkgray"))		return DARKGRAY;
-	else if (streq_ignore_ascii_case(str, "yellow"))			return YELLOW;
-	else if (streq_ignore_ascii_case(str, "gold"))				return GOLD;
-	else if (streq_ignore_ascii_case(str, "orange"))			return ORANGE;
-	else if (streq_ignore_ascii_case(str, "pink"))				return PINK;
-	else if (streq_ignore_ascii_case(str, "red"))					return RED;
-	else if (streq_ignore_ascii_case(str, "maroon"))			return MAROON;
-	else if (streq_ignore_ascii_case(str, "green"))				return GREEN;
-	else if (streq_ignore_ascii_case(str, "lime"))				return LIME;
-	else if (streq_ignore_ascii_case(str, "darkgreen"))		return DARKGREEN;
-	else if (streq_ignore_ascii_case(str, "skyblue"))			return SKYBLUE;
-	else if (streq_ignore_ascii_case(str, "blue"))				return BLUE;
-	else if (streq_ignore_ascii_case(str, "darkblue"))		return DARKBLUE;
-	else if (streq_ignore_ascii_case(str, "purple"))			return PURPLE;
-	else if (streq_ignore_ascii_case(str, "violet"))			return VIOLET;
-	else if (streq_ignore_ascii_case(str, "darkpurple"))	return DARKPURPLE;
-	else if (streq_ignore_ascii_case(str, "beige"))				return BEIGE;
-	else if (streq_ignore_ascii_case(str, "brown"))				return BROWN;
-	else if (streq_ignore_ascii_case(str, "darkbrown"))		return DARKBROWN;
-	else if (streq_ignore_ascii_case(str, "white"))				return WHITE;
-	else if (streq_ignore_ascii_case(str, "black"))				return BLACK;
-	else if (streq_ignore_ascii_case(str, "magenta"))			return MAGENTA;
-	else if (streq_ignore_ascii_case(str, "raywhite"))		return RAYWHITE;
-	else																									return BLANK;
+	const size_t len = strlen(str);
+	const char *upper_str = TextToUpper(str);
+	if (is_color(upper_str, len) == NULL) {
+		return BLANK;
+	} else {
+		return color_map[hash(upper_str, len)];
+	}
+}
+
+INLINE static float parse_float_or_panic(const char *str)
+{
+	char *end;
+	const float ret = strtof(str, &end);
+	if (end == flag_value || *end != '\0') {
+		panic("failed to parse `%s` to float\n", str);
+	} else if (errno == ERANGE) {
+		if (ret == HUGE_VAL) {
+			panic("overflew when tried to parse `%s` to float\n", str);
+		} else {
+			panic("underflew when tried to parse `%s` to float\n", str);
+		}
+	}
+	return ret;
+}
+
+INLINE static void provided_flag_example(const char *flag)
+{
+	printf("try to provide a flag following way:\n");
+	printf("%s=<value> or %s <value>\n", flag, flag);
 }
 
 static void handle_flags(void)
@@ -1010,7 +1170,9 @@ static void handle_flags(void)
 	} else if (code == PASSED) {
 		const Color new_brush_color = color_try_from_str(flag_value);
 		if (memcmp(&new_brush_color, &BLANK, sizeof(Color)) == 0) {
-			panic("unexpected color: %s\n", flag_value);
+			eprintf("unexpected color: `%s`\n", flag_value);
+			provided_flag_example("brush_color");
+			exit(1);
 		}
 
 		brush_color = new_brush_color;
@@ -1020,19 +1182,7 @@ static void handle_flags(void)
 	if (code == PASSED_WITHOUT_VALUE_UNEXPECTEDLY) {
 		panic("expected `brush_radius` flag to have a value\n");
 	} else if (code == PASSED) {
-		char *end;
-		const float new_brush_radius = strtof(flag_value, &end);
-		if (end == flag_value || *end != '\0') {
-			panic("failed to parse `%s` to float\n", flag_value);
-		} else if (errno == ERANGE) {
-			if (new_brush_radius == HUGE_VAL) {
-				panic("overflew when tried to parse `%s` to float\n", flag_value);
-			} else {
-				panic("underflew when tried to parse `%s` to float\n", flag_value);
-			}
-		}
-
-		brush_radius = new_brush_radius;
+		brush_radius = parse_float_or_panic(flag_value);
 	}
 }
 
@@ -1041,9 +1191,8 @@ i32 main(int argc_, char **argv_)
 	argc = (size_t) argc_;
 	argv = argv_;
 
-	memory_init(1);
-
 	if (argc > 1) {
+		memory_init(1);
 		handle_flags();
 	}
 
@@ -1081,7 +1230,7 @@ i32 main(int argc_, char **argv_)
 			ClearBackground(BACKGROUND_COLOR);
 			if (selection_mode) {
 				draw_selection();
-			} else if (alt_mode) {
+			} else if (alt_mode || drawing_now || color_selector_mode) {
 				DrawTextureEx(screenshot_texture,
 											image_pos,
 											0,
@@ -1107,6 +1256,10 @@ i32 main(int argc_, char **argv_)
 			if (timer_mode) {
 				handle_timer_mode();
 			}
+
+			if (color_selector_mode) {
+				handle_color_selector_mode();
+			}
 		}
 		EndDrawing();
 	}
@@ -1120,8 +1273,11 @@ i32 main(int argc_, char **argv_)
 #undef X
 
 	deinit_raylib();
-	memory_release();
 	XCloseDisplay(xdisplay);
+
+	if (argc > 1) {
+		memory_release();
+	}
 
 	return 0;
 }
