@@ -677,6 +677,7 @@ static void take_screenshot(void)
 		save_image_data(data, w, h);
 
 		free(data);
+		free(drawn_data);
 	} else {
 		save_fullscreen();
 	}
