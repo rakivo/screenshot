@@ -188,7 +188,7 @@ static XWindowAttributes gwa = {0};
 static Image screenshot, darker_screenshot = {0};
 static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
-static uint8_t *original_image_data = NULL;
+static u8 *original_image_data = NULL;
 
 static RenderTexture2D canvas = {0};
 
@@ -487,7 +487,7 @@ char *get_file_path_(char *file_path, u64 rec_count)
 	return file_path;
 }
 
-INLINE static uint8_t *draw_canvas_into_image(uint8_t *data, int w, int h)
+INLINE static u8 *draw_canvas_into_image(u8 *data, int w, int h)
 {
 	Image image = (Image) {
 		.data = data,
@@ -524,7 +524,7 @@ INLINE static void save_fullscreen(void)
 	ExportImage(image, file_path);
 }
 
-INLINE static void save_image_data(uint8_t *data, int w, int h)
+INLINE static void save_image_data(u8 *data, int w, int h)
 {
 	const char *file_path = get_file_path(OUTPUT_FILE_NAME
 																				OUTPUT_FILE_EXTENSION);
@@ -1072,9 +1072,9 @@ static void handle_color_selector_mode(void)
 
 INLINE static void preserve_original_image_data(void)
 {
-	original_image_data = (uint8_t *) malloc(sizeof(RGB)*
-																					 screenshot.width*
-																					 screenshot.height);
+	original_image_data = (u8 *) malloc(sizeof(RGB)*
+																			screenshot.width*
+																			screenshot.height);
 
 	memcpy(original_image_data,
 				 screenshot.data,
