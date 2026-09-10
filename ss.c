@@ -12,10 +12,12 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#ifndef WAYLAND
 #define Font XFont
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #undef Font
+#endif
 
 #define SCRATCH_BUFFER_IMPLEMENTATION
 #include "scratch_buffer.h"
@@ -24,6 +26,7 @@
 #include "hash.c"
 
 #define DEBUG 0
+#define WAYLAND
 
 #define streq(str1, str2) (strcmp(str1, str2) == 0)
 #define strcaseeq(str1, str2) (strcasecmp(str1, str2) == 0)
@@ -72,7 +75,7 @@
 #define MAX_ZOOM 10.0f
 #define STARTING_ZOOM 1.0f
 
-#define PANNING_FACTOR 5.0f
+#define PANNING_FACTOR 6.0f
 #define PANNING_ZOOM_FACTOR 0.18f
 
 #define SCROLL_SPEED 150.0f
@@ -170,6 +173,12 @@ static time_t timer_start = 0;
 
 static Font font = {0};
 
+static Shader circle_shader = {0};
+static int circle_shader_radius_loc = -1;
+static int circle_shader_center_loc = -1;
+static int circle_shader_resol_loc = -1;
+static int circle_shader_smoothness_loc = -1;
+
 static bool pan_mode, alt_mode, selection_mode, resize_mode = false;
 
 #define DOUBLE_UNINITIALIZED 0.0f
@@ -182,13 +191,21 @@ static Vector2 selection_start, selection_end = {DOUBLE_UNINITIALIZED, DOUBLE_UN
 
 static Vector2 cur_pos, image_pos, dmouse_pos = {0};
 
+#ifndef WAYLAND
 static Display *xdisplay = NULL;
 static XWindowAttributes gwa = {0};
+#endif
+
+int screen_width, screen_height;
 
 static Image screenshot, darker_screenshot = {0};
 static Texture2D screenshot_texture, darker_screenshot_texture = {0};
 
 static u8 *original_image_data = NULL;
+
+static u8 *drawn_data_buffer  = NULL; // full-res working copy of the image
+static u8 *crop_data_buffer   = NULL; // holds the (possibly cropped) output
+static u8 *row_scratch_buffer = NULL; // one row, used for in-place flips
 
 static RenderTexture2D canvas = {0};
 
@@ -301,12 +318,20 @@ INLINE static void init_raylib(void)
 	font = LoadFont_Font();
 	SetExitKey(0);
 	HideCursor();
+
+	circle_shader = LoadShaderFromMemory(0, CIRCLE_SHADER);
+	circle_shader_radius_loc = GetShaderLocation(circle_shader, "radius");
+	circle_shader_center_loc = GetShaderLocation(circle_shader, "center");
+	circle_shader_resol_loc = GetShaderLocation(circle_shader, "renderSize");
+	circle_shader_smoothness_loc = GetShaderLocation(circle_shader, "smoothness");
+
 	raylib_initialized = true;
 }
 
 INLINE static void deinit_raylib(void)
 {
 	if (raylib_initialized) {
+		UnloadShader(circle_shader);
 		UnloadTexture(font.texture);
 		UnloadRenderTexture(canvas);
 		CloseWindow();
@@ -337,6 +362,84 @@ INLINE static u8 darken_channel(u8 c)
 	return MIN(0xFF, MAX(0, c*DARKEN_FACTOR));
 }
 
+#ifdef WAYLAND
+static void capture_screen(void)
+{
+	FILE *pipe = popen("grim -", "r");
+	if (!pipe) {
+		panic("could not execute `grim`\n");
+	}
+
+	usize capacity = 1024 * 1024 * 5;  // Start with a 5MB buffer
+	usize size = 0;
+	u8 *file_data = (u8 *) malloc(capacity);
+
+	while (true) {
+		usize bytes_read = fread(file_data + size, 1, capacity - size, pipe);
+		if (bytes_read == 0) break;
+		size += bytes_read;
+
+		if (size == capacity) {
+			capacity *= 2;
+			file_data = (u8 *) realloc(file_data, capacity);
+		}
+	}
+	pclose(pipe);
+
+	Image wl_image = LoadImageFromMemory(".png", file_data, (int)size);
+
+	if (!wl_image.data) {
+		panic("failed to load screenshot data from grim\n");
+	}
+
+	//
+	// grim might output an image with an alpha channel (RGBA).
+	// Coerce the format so our 3-byte RGB iteration below doesn't fault.
+	//
+	ImageFormat(&wl_image, PIXELFORMAT_UNCOMPRESSED_R8G8B8);
+
+	const u32 w = wl_image.width;
+	const u32 h = wl_image.height;
+
+	screen_width  = w;
+	screen_height = h;
+
+	u8 *data = (u8 *) malloc(w * h * sizeof(RGB));
+	u8 *darker_data = (u8 *) malloc(w * h * sizeof(RGB));
+
+	u8 *img_pixels = (u8 *) wl_image.data;
+
+	for (usize y = 0; y < h; y++) {
+		for (usize x = 0; x < w; x++) {
+			const usize idx = (y * w + x) * sizeof(RGB);
+
+			const u8 r = img_pixels[idx + 0];
+			const u8 g = img_pixels[idx + 1];
+			const u8 b = img_pixels[idx + 2];
+
+			data[idx + 0] = r;
+			data[idx + 1] = g;
+			data[idx + 2] = b;
+
+			darker_data[idx + 0] = darken_channel(r);
+			darker_data[idx + 1] = darken_channel(g);
+			darker_data[idx + 2] = darken_channel(b);
+		}
+	}
+
+	UnloadImage(wl_image);
+
+	fill_image(&screenshot,
+						 w, h,
+						 PIXELFORMAT_UNCOMPRESSED_R8G8B8,
+						 data);
+
+	fill_image(&darker_screenshot,
+						 w, h,
+						 PIXELFORMAT_UNCOMPRESSED_R8G8B8,
+						 darker_data);
+}
+#else
 static void capture_screen(Window root, XWindowAttributes gwa)
 {
 	XImage *ximage = XGetImage(xdisplay,
@@ -354,6 +457,9 @@ static void capture_screen(Window root, XWindowAttributes gwa)
 	const u32 w = ximage->width;
 	const u32 h = ximage->height;
 
+	screen_width  = w;
+	screen_height = h;
+
 	u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
 	u8 *darker_data = (u8 *) malloc(w*h*sizeof(RGB));
 
@@ -366,11 +472,11 @@ static void capture_screen(Window root, XWindowAttributes gwa)
 			const u8 g = (p & ximage->green_mask) >> 8;
 			const u8 b = (p & ximage->blue_mask)  >> 0;
 
-			data[idx]     = r;
+			data[idx + 0] = r;
 			data[idx + 1] = g;
 			data[idx + 2] = b;
 
-			darker_data[idx]     = darken_channel(r);
+			darker_data[idx + 0] = darken_channel(r);
 			darker_data[idx + 1] = darken_channel(g);
 			darker_data[idx + 2] = darken_channel(b);
 		}
@@ -388,6 +494,7 @@ static void capture_screen(Window root, XWindowAttributes gwa)
 						 PIXELFORMAT_UNCOMPRESSED_R8G8B8,
 						 darker_data);
 }
+#endif
 
 // Stolen from: <https://github.com/NSinecode/Raylib-Drawing-texture-in-circle/blob/master/CircleTextureDrawing.cpp>
 static void DrawCollisionTextureCircle(Texture2D texture,
@@ -396,28 +503,22 @@ static void DrawCollisionTextureCircle(Texture2D texture,
 																float radius,
 																Color color)
 {
-	const Shader shader = LoadShaderFromMemory(0, CIRCLE_SHADER);
-	const int radius_loc = GetShaderLocation(shader, "radius");
-	SetShaderValue(shader, radius_loc, &radius, SHADER_UNIFORM_FLOAT);
+	SetShaderValue(circle_shader, circle_shader_radius_loc, &radius, SHADER_UNIFORM_FLOAT);
 
 	const float ci_ce[2] = {circle_center.x, circle_center.y};
-	const int center_loc = GetShaderLocation(shader, "center");
-	SetShaderValue(shader, center_loc, &ci_ce, SHADER_UNIFORM_VEC2);
+	SetShaderValue(circle_shader, circle_shader_center_loc, &ci_ce, SHADER_UNIFORM_VEC2);
 
-	const float resolution[2] = {texture.width, texture.height};
-	const int resol_loc = GetShaderLocation(shader, "renderSize");
-	SetShaderValue(shader, resol_loc, &resolution, SHADER_UNIFORM_VEC2);
+	const float resolution[2] = {(float) texture.width, (float) texture.height};
+	SetShaderValue(circle_shader, circle_shader_resol_loc, &resolution, SHADER_UNIFORM_VEC2);
 
 	const float smoothness = 10.0f;
-	const int smoothnessLoc = GetShaderLocation(shader, "smoothness");
-	SetShaderValue(shader, smoothnessLoc, &smoothness, SHADER_UNIFORM_FLOAT);
+	SetShaderValue(circle_shader, circle_shader_smoothness_loc, &smoothness, SHADER_UNIFORM_FLOAT);
 
-	BeginShaderMode(shader);
+	BeginShaderMode(circle_shader);
 
 	DrawTextureEx(texture, pos, 0, zoom, color);
 
 	EndShaderMode();
-	UnloadShader(shader);
 }
 
 INLINE static void stop_selection_mode(void)
@@ -504,7 +605,21 @@ INLINE static u8 *draw_canvas_into_image(u8 *data, int w, int h)
 
 	ImageDraw(&image, canvas_image, src_rec, dst_rec, WHITE);
 
+	UnloadImage(canvas_image);
+
 	return image.data;
+}
+
+INLINE static void flip_vertical_inplace(u8 *data, i32 w, i32 h)
+{
+	const usize row_size = (usize) w * sizeof(RGB);
+	for (i32 y = 0; y < h / 2; y++) {
+		u8 *top = data + (usize) y * row_size;
+		u8 *bot = data + (usize) (h - 1 - y) * row_size;
+		memcpy(row_scratch_buffer, top, row_size);
+		memcpy(top, bot, row_size);
+		memcpy(bot, row_scratch_buffer, row_size);
+	}
 }
 
 INLINE static void save_fullscreen(void)
@@ -547,23 +662,21 @@ INLINE static i32 wrap(i32 x, i32 max)
 	return x;
 }
 
-INLINE static u8 *crop_image(const u8 *img_data,
+INLINE static void crop_image(const u8 *img_data,
 														 i32 img_w, i32 img_h,
 														 i32 w, i32 h,
-														 i32 x, i32 y)
+														 i32 x, i32 y,
+														 u8 *out_data)
 {
-	u8 *data = (u8 *) malloc(w*h*sizeof(RGB));
 	for (i32 row = 0; row < h; row++) {
 		i32 wy = wrap(y + row, img_h);
 		for (i32 col = 0; col < w; col++) {
 			i32 wx = wrap(x + col, img_w);
 			i32 src_offset = (wy*img_w + wx)*sizeof(RGB);
 			i32 dst_offset = (row*w + col)*sizeof(RGB);
-			memcpy(data + dst_offset, img_data + src_offset, sizeof(RGB));
+			memcpy(out_data + dst_offset, img_data + src_offset, sizeof(RGB));
 		}
 	}
-
-	return data;
 }
 
 INLINE static void get_selection_corners(whxy_t whxy,
@@ -642,7 +755,6 @@ static void take_screenshot(void)
 {
 	if (selection_mode) {
 		const whxy_t whxy = get_selection_data();
-
 		WHXY_UNPACK_I32
 
 		x = fabsf(x - image_pos.x) / zoom;
@@ -650,34 +762,24 @@ static void take_screenshot(void)
 		w /= zoom;
 		h /= zoom;
 
-		u8 *drawn_data = (u8 *) malloc(screenshot.width*screenshot.height*sizeof(RGB));
-		memcpy(drawn_data, original_image_data, screenshot.width*screenshot.height*sizeof(RGB));
+		memcpy(
+			drawn_data_buffer, original_image_data,
+			sizeof(RGB)*screenshot.width*screenshot.height
+		);
 
-		Image image = (Image) {
-			.data = drawn_data,
-			.width = screenshot.width,
-			.height = screenshot.height,
-			.mipmaps = screenshot.mipmaps,
-			.format = screenshot.format
-		};
+		flip_vertical_inplace(drawn_data_buffer, screenshot.width, screenshot.height);
 
-		// TODO: avoid flipping the image twice, but flip canvas once
-		ImageFlipVertical(&image);
+		draw_canvas_into_image(drawn_data_buffer, screenshot.width, screenshot.height);
+		flip_vertical_inplace(drawn_data_buffer, screenshot.width, screenshot.height);
 
-		image.data = draw_canvas_into_image(image.data, image.width, image.height);
-
-		ImageFlipVertical(&image);
-
-		u8 *data = crop_image(image.data,
-													screenshot.width,
-													screenshot.height,
-													w, h, x, y);
+		crop_image(drawn_data_buffer,
+							 screenshot.width,
+							 screenshot.height,
+							 w, h, x, y,
+							 crop_data_buffer);
 
 		stop_selection_mode();
-		save_image_data(data, w, h);
-
-		free(data);
-		free(drawn_data);
+		save_image_data(crop_data_buffer, w, h);
 	} else {
 		save_fullscreen();
 	}
@@ -705,7 +807,7 @@ static i32 check_color_selector_collisions(Vector2 mouse_pos)
 	return -1;
 }
 
-static void handle_input(void)
+static bool handle_input(void)
 {
 	const float wheel_move = GetMouseWheelMove();
 	const Vector2 mouse_pos = GetMousePosition();
@@ -738,7 +840,7 @@ static void handle_input(void)
 		if (GetTime() - color_selector_mode_ending > 0.25) {
 			color_selector_mode_ending = DOUBLE_UNINITIALIZED;
 		} else {
-			return;
+			return false;
 		}
 	}
 
@@ -786,7 +888,7 @@ static void handle_input(void)
 		}
 	}
 
-	if (!drawing_now && resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+	if (!drawing_now && !pan_mode && resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 		const u8 corner = selection_check_corner_collisions(mouse_pos);
 		if (corner != SELECTION_POISONED) {
 			resizing_now = true;
@@ -797,7 +899,7 @@ static void handle_input(void)
 		}
 	}
 
-	if (!color_selector_mode && !alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
+	if (!color_selector_mode && !pan_mode && !alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
 		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 			drawing_now = true;
 			BeginTextureMode(canvas);
@@ -836,6 +938,7 @@ static void handle_input(void)
 
 	else if (IsKeyPressed(KEY_ENTER)) {
 		take_screenshot();
+		return true;
 	}
 
 	else if (IsKeyPressed(KEY_C)) {
@@ -885,7 +988,7 @@ static void handle_input(void)
 				BOOSTED_SCROLL_SENSITIVITY :
 				SCROLL_SENSITIVITY;
 
-			const float tradius = MIN(MIN(gwa.width, gwa.height), MAX(15.0, radius + sine*sens));
+			const float tradius = MIN(MIN(screen_width, screen_height), MAX(15.0, radius + sine*sens));
 			radius += (tradius - radius)*SMOOTHING_FACTOR;
 		} else {
 			Vector2 offset = Vector2DivideValue(Vector2Subtract(mouse_pos, image_pos), zoom);
@@ -903,9 +1006,13 @@ static void handle_input(void)
 		if (!pan_mode) {
 			pan_mode = true;
 		}
-		Vector2 delta = Vector2Subtract(mouse_pos, dmouse_pos);
-		delta = Vector2Scale(delta, PANNING_FACTOR*(zoom*PANNING_ZOOM_FACTOR));
-		image_pos = Vector2Add(image_pos, delta);
+
+		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+			Vector2 delta = Vector2Subtract(mouse_pos, dmouse_pos);
+			delta = Vector2Scale(delta, PANNING_FACTOR*(zoom*PANNING_ZOOM_FACTOR));
+			image_pos = Vector2Add(image_pos, delta);
+		}
+
 		cur_pos = mouse_pos;
 	} else {
 		pan_mode = false;
@@ -923,6 +1030,8 @@ static void handle_input(void)
 	}
 
 	dmouse_pos = cur_pos;
+
+	return false;
 }
 
 static void draw_selection(void)
@@ -1207,6 +1316,7 @@ i32 main(int argc_, char **argv_)
 		handle_flags();
 	}
 
+#ifndef WAYLAND
 	xdisplay = XOpenDisplay(NULL);
 	if (!xdisplay) {
 		panic("could not to open X display");
@@ -1214,11 +1324,17 @@ i32 main(int argc_, char **argv_)
 
 	const Window root = DefaultRootWindow(xdisplay);
 	XGetWindowAttributes(xdisplay, root, &gwa);
+#endif
 
 	cur_pos = (Vector2) {center_x, center_y};
 	output_file_name_len = strlen(OUTPUT_FILE_NAME);
 
+#ifndef WAYLAND
 	capture_screen(root, gwa);
+#else
+	capture_screen();
+#endif
+
 	preserve_original_image_data();
 
 	if (immediate_screenshot_and_exit) {
@@ -1226,16 +1342,28 @@ i32 main(int argc_, char **argv_)
 		exit(0);
 	}
 
+	const usize max_crop_w = (usize) (screenshot.width  / MIN_ZOOM) + 1;
+	const usize max_crop_h = (usize) (screenshot.height / MIN_ZOOM) + 1;
+
+	drawn_data_buffer  = (u8 *) malloc(sizeof(RGB) * screenshot.width * screenshot.height);
+	crop_data_buffer   = (u8 *) malloc(sizeof(RGB) * max_crop_w * max_crop_h);
+	row_scratch_buffer = (u8 *) malloc(sizeof(RGB) * screenshot.width);
+
+	if (!drawn_data_buffer || !crop_data_buffer || !row_scratch_buffer) {
+		panic("failed to allocate scratch buffers\n");
+	}
+
 	init_raylib();
 
-	canvas = LoadRenderTexture(gwa.width, gwa.height);
+	canvas = LoadRenderTexture(screen_width, screen_height);
 	clear_canvas();
 
 	screenshot_texture = LoadTextureFromImage(screenshot);
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
 
 	while (!WindowShouldClose()) {
-		handle_input();
+		if (handle_input()) break;
+
 		BeginDrawing();
 		{
 			ClearBackground(BACKGROUND_COLOR);
@@ -1249,17 +1377,18 @@ i32 main(int argc_, char **argv_)
 											WHITE);
 
 			} else {
-				DrawTextureEx(darker_screenshot_texture,
-											image_pos,
-											0,
-											zoom,
-											WHITE);
+				DrawTextureEx(darker_screenshot_texture, image_pos, 0, zoom, WHITE);
 
-				DrawCollisionTextureCircle(screenshot_texture,
-																	 image_pos,
-																	 cur_pos,
-																	 radius,
-																	 WHITE);
+				// Translate screen coordinates
+				Vector2 texture_center = {
+					(cur_pos.x - image_pos.x) / zoom,
+					(cur_pos.y - image_pos.y) / zoom
+				};
+
+				// Scale the radius so it visually stays the same size
+				float scaled_radius = radius / zoom;
+
+				DrawCollisionTextureCircle(screenshot_texture, image_pos, texture_center, scaled_radius, WHITE);
 			}
 
 			draw_canvas();
@@ -1284,7 +1413,15 @@ i32 main(int argc_, char **argv_)
 #undef X
 
 	deinit_raylib();
+
+#ifndef WAYLAND
 	XCloseDisplay(xdisplay);
+#endif
+
+	free(original_image_data);
+	free(drawn_data_buffer);
+	free(crop_data_buffer);
+	free(row_scratch_buffer);
 
 	if (argc > 1) {
 		memory_release();
