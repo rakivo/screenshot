@@ -109,10 +109,10 @@ extern char **environ;
 #define RADIUS_ZOOM_OUT_FACTOR 7.6f
 #define STARTING_RADIUS 150
 
-#define RESIZE_RING_RADIUS        8.0f
+#define RESIZE_RING_RADIUS        10.0f
 #define RESIZE_RING_THICKNESS     1.3f
-#define RESIZE_RING_SEGMENTS      25
-#define RESIZE_RING_HIT_RADIUS    16.0f   // much bigger than the visual radius - forgiving grab area
+#define RESIZE_RING_SEGMENTS      30
+#define RESIZE_RING_HIT_RADIUS    14.0f   // much bigger than the visual radius - forgiving grab area
 #define RESIZE_RING_ANIM_SPEED    14.0f   // higher = snappier fill/unfill
 
 #define RESIZE_RING_COLOR         ((Color) {0, 170, 47, 255})
@@ -222,6 +222,7 @@ static int circle_shader_resol_loc = -1;
 static int circle_shader_smoothness_loc = -1;
 
 static bool pan_mode, alt_mode, selection_mode, resize_mode = false;
+static Vector2 resize_anchor;
 static bool suppress_draw_until_release = false;
 
 #define DOUBLE_UNINITIALIZED 0.0f
@@ -944,28 +945,35 @@ static bool handle_input(void)
 				selection_end = Vector2Add(selection_end, delta);
 			} break;
 
-			case SELECTION_UPPER_LEFT: {
-				const Vector2 p = screen_to_image(mouse_pos);
-				selection_start.x = fminf(p.x, selection_end.x - MIN_SELECTION_SIZE);
-				selection_start.y = fminf(p.y, selection_end.y - MIN_SELECTION_SIZE);
-			} break;
-
-			case SELECTION_UPPER_RIGHT: {
-				const Vector2 p = screen_to_image(mouse_pos);
-				selection_end.x   = fmaxf(p.x, selection_start.x + MIN_SELECTION_SIZE);
-				selection_start.y = fminf(p.y, selection_end.y - MIN_SELECTION_SIZE);
-			} break;
-
-			case SELECTION_BOTTOM_LEFT: {
-				const Vector2 p = screen_to_image(mouse_pos);
-				selection_start.x = fminf(p.x, selection_end.x - MIN_SELECTION_SIZE);
-				selection_end.y   = fmaxf(p.y, selection_start.y + MIN_SELECTION_SIZE);
-			} break;
-
+			case SELECTION_UPPER_LEFT:
+			case SELECTION_UPPER_RIGHT:
+			case SELECTION_BOTTOM_LEFT:
 			case SELECTION_BOTTOM_RIGHT: {
-				const Vector2 p = screen_to_image(mouse_pos);
-				selection_end.x = fmaxf(p.x, selection_start.x + MIN_SELECTION_SIZE);
-				selection_end.y = fmaxf(p.y, selection_start.y + MIN_SELECTION_SIZE);
+			    const Vector2 drag = screen_to_image(mouse_pos);
+
+			    float dx = drag.x - resize_anchor.x;
+			    float dy = drag.y - resize_anchor.y;
+
+			    // Keep at least MIN_SELECTION_SIZE away from the anchor on
+			    // whichever side we're currently on, so the rect can't collapse
+			    // to zero right at the flip point — but let the sign flip once
+			    // the mouse has actually crossed to the other side.
+			    if (fabsf(dx) < MIN_SELECTION_SIZE) {
+			        dx = (dx < 0.0f) ? -MIN_SELECTION_SIZE : MIN_SELECTION_SIZE;
+			    }
+			    if (fabsf(dy) < MIN_SELECTION_SIZE) {
+			        dy = (dy < 0.0f) ? -MIN_SELECTION_SIZE : MIN_SELECTION_SIZE;
+			    }
+
+			    const Vector2 clamped = {
+			        resize_anchor.x + dx,
+			        resize_anchor.y + dy,
+			    };
+
+			    selection_start.x = fminf(resize_anchor.x, clamped.x);
+			    selection_end.x   = fmaxf(resize_anchor.x, clamped.x);
+			    selection_start.y = fminf(resize_anchor.y, clamped.y);
+			    selection_end.y   = fmaxf(resize_anchor.y, clamped.y);
 			} break;
 
 			default: panic("unreachable"); break;
@@ -976,14 +984,31 @@ static bool handle_input(void)
 	}
 
 	if (!drawing_now && !pan_mode && resize_mode && !resizing_now && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-		const u8 corner = selection_check_corner_collisions(mouse_pos);
-		if (corner != SELECTION_POISONED) {
-			resizing_now = true;
-			resizing_what = corner;
-		} else if (alt_mode && selection_check_collisions(mouse_pos)) {
-			resizing_now = true;
-			resizing_what = SELECTION_INSIDE;
-		}
+    const u8 corner = selection_check_corner_collisions(mouse_pos);
+    if (corner != SELECTION_POISONED) {
+        resizing_now = true;
+        resizing_what = corner;
+
+        switch (corner) {
+        case SELECTION_UPPER_LEFT:
+            resize_anchor = selection_end;
+            break;
+        case SELECTION_UPPER_RIGHT:
+            resize_anchor = (Vector2) { selection_start.x, selection_end.y };
+            break;
+        case SELECTION_BOTTOM_LEFT:
+            resize_anchor = (Vector2) { selection_end.x, selection_start.y };
+            break;
+        case SELECTION_BOTTOM_RIGHT:
+            resize_anchor = selection_start;
+            break;
+        default: break;
+        }
+
+    } else if (alt_mode && selection_check_collisions(mouse_pos)) {
+        resizing_now = true;
+        resizing_what = SELECTION_INSIDE;
+    }
 	}
 
 	if (suppress_draw_until_release) {
