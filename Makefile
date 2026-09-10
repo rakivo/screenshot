@@ -1,6 +1,6 @@
 CC := cc
 CFLAGS := -std=gnu99
-CLIBS := -lm -lX11 -lraylib -I/usr/include/raylib
+CLIBS := -lm -lraylib -I/usr/include/raylib
 SRC_FILES := $(filter-out ss.c, $(wildcard *.[ch]))
 WFLAGS := -Wall -Wextra
 

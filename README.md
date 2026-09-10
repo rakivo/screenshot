@@ -1,1 +1,7 @@
 # UNFINISHED
+
+# Build
+
+```
+make release
+```
