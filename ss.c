@@ -8,6 +8,10 @@
 #include <stdint.h>
 #include <strings.h>
 #include <stdbool.h>
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <limits.h>
 
 #include <raylib.h>
 #include <raymath.h>
@@ -25,8 +29,20 @@
 #include "font.h"
 #include "hash.c"
 
+extern char **environ;
+
 #define DEBUG 0
 #define WAYLAND
+
+#ifdef DEBUG
+#define TIMESTAMP(label) do { \
+	struct timespec _ts; \
+	clock_gettime(CLOCK_REALTIME, &_ts); \
+	eprintf("[%s] %ld.%09ld\n", label, _ts.tv_sec, _ts.tv_nsec); \
+} while (0)
+#else
+#define TIMESTAMP(label)
+#endif
 
 #define streq(str1, str2) (strcmp(str1, str2) == 0)
 #define strcaseeq(str1, str2) (strcasecmp(str1, str2) == 0)
@@ -59,24 +75,33 @@
 
 #define BACKGROUND_COLOR ((Color) {10, 10, 10, 255})
 
-#define WINDOW_FLAGS (FLAG_FULLSCREEN_MODE | FLAG_WINDOW_UNDECORATED | FLAG_WINDOW_TOPMOST)
+#define WINDOW_FLAGS (FLAG_WINDOW_UNDECORATED | FLAG_WINDOW_TOPMOST | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT)
 
 #define DARKEN_FACTOR 0.45f
 
+#define FONT_SIZE 20.0f
+
 #define SCROLL_SENSITIVITY 350.0f
 #define BOOSTED_SCROLL_SENSITIVITY (SCROLL_SENSITIVITY*3)
+
+#define SELECTION_DRAG_THRESHOLD 4.0f
+#define MIN_SELECTION_SIZE       2.0f
+
 
 #define BRUSH_RADIUS_SENSITIVITY 1.0f
 #define BOOSTED_BRUSH_RADIUS_SENSITIVITY 3.0f
 
 #define ZOOM_SPEED 1.2f
 #define BOOSTED_ZOOM_SPEED 2.2f
-#define MIN_ZOOM 0.7f
+#define MIN_ZOOM 0.4f
 #define MAX_ZOOM 10.0f
 #define STARTING_ZOOM 1.0f
+#define BOOSTED_ZOOM_STEP 1.30f
+#define ZOOM_STEP 1.12f
+#define ZOOM_SMOOTHING_FACTOR 0.25f
 
-#define PANNING_FACTOR 6.0f
-#define PANNING_ZOOM_FACTOR 0.18f
+#define PANNING_FACTOR 1.0f
+#define PAN_ZOOM_EXPONENT 0.5f
 
 #define SCROLL_SPEED 150.0f
 #define SMOOTHING_FACTOR 0.1f
@@ -84,10 +109,24 @@
 #define RADIUS_ZOOM_OUT_FACTOR 7.6f
 #define STARTING_RADIUS 150
 
-#define RESIZE_RING_RADIUS 8.0f
-#define RESIZE_RING_THICKNESS 1.3f
-#define RESIZE_RING_SEGMENTS 25
-#define RESIZE_RING_COLOR ((Color) {0, 170, 47, 255})
+#define RESIZE_RING_RADIUS        8.0f
+#define RESIZE_RING_THICKNESS     1.3f
+#define RESIZE_RING_SEGMENTS      25
+#define RESIZE_RING_HIT_RADIUS    16.0f   // much bigger than the visual radius - forgiving grab area
+#define RESIZE_RING_ANIM_SPEED    14.0f   // higher = snappier fill/unfill
+
+#define RESIZE_RING_COLOR         ((Color) {0, 170, 47, 255})
+#define RESIZE_RING_HOVER_COLOR   ((Color) {60, 210, 100, 255})
+#define RESIZE_RING_PRESSED_COLOR ((Color) {255, 165, 0, 255})
+
+#define SELECTION_CORNER_COUNT 4
+
+static float corner_fill[SELECTION_CORNER_COUNT] = {0}; // animated 0..1 per corner
+
+static inline float ease_towards(float current, float target, float speed, float dt)
+{
+	return current + (target - current) * (1.0f - expf(-speed * dt));
+}
 
 #define GLSL_VERSION 300
 
@@ -110,12 +149,12 @@ typedef struct { u8 r, g, b; } RGB;
 typedef struct { float w, h, x, y; } whxy_t;
 
 enum {
-	SELECTION_POISONED = 0,
-	SELECTION_INSIDE,
-	SELECTION_UPPER_LEFT,
+	SELECTION_UPPER_LEFT = 0,
 	SELECTION_UPPER_RIGHT,
 	SELECTION_BOTTOM_LEFT,
-	SELECTION_BOTTOM_RIGHT
+	SELECTION_BOTTOM_RIGHT,
+	SELECTION_INSIDE,     // not a corner index, never used on corners[]/corner_fill[]
+	SELECTION_POISONED    // sentinel, never used on corners[]/corner_fill[]
 };
 
 enum {
@@ -150,9 +189,11 @@ const char* CIRCLE_SHADER =
 "    }\n"
 "}";
 
+#define OUTPUT_DIR_NAME "Pictures"
 #define OUTPUT_FILE_NAME "screenshot"
 #define OUTPUT_FILE_EXTENSION ".png"
 
+static char   output_file_base[PATH_MAX + 64]; // e.g. /home/user/Pictures/screenshot
 static size_t output_file_name_len = 0;
 
 #define BRUSH_COLOR RED
@@ -162,6 +203,7 @@ static Color brush_color = BRUSH_COLOR;
 static float brush_radius = BRUSH_RADIUS;
 
 static float zoom = STARTING_ZOOM;
+static float target_zoom = STARTING_ZOOM;
 
 static u32 radius = STARTING_RADIUS;
 
@@ -180,6 +222,7 @@ static int circle_shader_resol_loc = -1;
 static int circle_shader_smoothness_loc = -1;
 
 static bool pan_mode, alt_mode, selection_mode, resize_mode = false;
+static bool suppress_draw_until_release = false;
 
 #define DOUBLE_UNINITIALIZED 0.0f
 
@@ -310,20 +353,32 @@ static bool raylib_initialized = false;
 
 INLINE static void init_raylib(void)
 {
-	const int m = GetCurrentMonitor();
-	SetTargetFPS(144);
 	SetTraceLogLevel(LOG_NONE);
 	if (!DEBUG) SetConfigFlags(WINDOW_FLAGS);
-	InitWindow(GetMonitorWidth(m), GetMonitorHeight(m), "ss");
+	TIMESTAMP("  before InitWindow");
+
+	InitWindow(screen_width, screen_height, "ss");
+	SetWindowPosition(0, 0);
+	TIMESTAMP("  after InitWindow");
+
+	const int m = GetCurrentMonitor();
+	const int fps = GetMonitorRefreshRate(m);
+	SetTargetFPS(fps);
+	TIMESTAMP("  after monitor/fps queries");
+
 	font = LoadFont_Font();
-	SetExitKey(0);
+	TIMESTAMP("  after LoadFont_Font");
+
 	HideCursor();
 
 	circle_shader = LoadShaderFromMemory(0, CIRCLE_SHADER);
-	circle_shader_radius_loc = GetShaderLocation(circle_shader, "radius");
-	circle_shader_center_loc = GetShaderLocation(circle_shader, "center");
-	circle_shader_resol_loc = GetShaderLocation(circle_shader, "renderSize");
+	TIMESTAMP("  after LoadShaderFromMemory");
+
+	circle_shader_radius_loc     = GetShaderLocation(circle_shader, "radius");
+	circle_shader_center_loc     = GetShaderLocation(circle_shader, "center");
+	circle_shader_resol_loc      = GetShaderLocation(circle_shader, "renderSize");
 	circle_shader_smoothness_loc = GetShaderLocation(circle_shader, "smoothness");
+	TIMESTAMP("  after GetShaderLocation calls");
 
 	raylib_initialized = true;
 }
@@ -336,6 +391,26 @@ INLINE static void deinit_raylib(void)
 		UnloadRenderTexture(canvas);
 		CloseWindow();
 	}
+}
+
+INLINE static Vector2 Vector2Value(float value)
+{
+	return (Vector2) {value, value};
+}
+
+INLINE static Vector2 Vector2DivideValue(Vector2 v, float div)
+{
+	return (Vector2) { v.x / div, v.y / div };
+}
+
+INLINE static Vector2 screen_to_image(Vector2 screen_pos)
+{
+	return Vector2DivideValue(Vector2Subtract(screen_pos, image_pos), zoom);
+}
+
+INLINE static Vector2 image_to_screen(Vector2 image_coord)
+{
+	return Vector2Add(Vector2Multiply(image_coord, Vector2Value(zoom)), image_pos);
 }
 
 INLINE static void clear_canvas(void)
@@ -365,74 +440,99 @@ INLINE static u8 darken_channel(u8 c)
 #ifdef WAYLAND
 static void capture_screen(void)
 {
-	FILE *pipe = popen("grim -", "r");
+	int pipefd[2];
+	if (pipe(pipefd) != 0) {
+		panic("could not create pipe: %s\n", strerror(errno));
+	}
+
+	posix_spawn_file_actions_t actions;
+	posix_spawn_file_actions_init(&actions);
+	posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+	posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+
+	char *spawn_argv[] = {"grim", "-t", "ppm", "-", NULL};
+
+	pid_t pid;
+	int spawn_ret = posix_spawnp(&pid, "grim", &actions, NULL, spawn_argv, environ);
+
+	posix_spawn_file_actions_destroy(&actions);
+	close(pipefd[1]);
+
+	if (spawn_ret != 0) {
+		close(pipefd[0]);
+		panic("could not execute `grim`: %s\n", strerror(spawn_ret));
+	}
+
+	FILE *pipe = fdopen(pipefd[0], "rb");
 	if (!pipe) {
-		panic("could not execute `grim`\n");
-	}
-
-	usize capacity = 1024 * 1024 * 5;  // Start with a 5MB buffer
-	usize size = 0;
-	u8 *file_data = (u8 *) malloc(capacity);
-
-	while (true) {
-		usize bytes_read = fread(file_data + size, 1, capacity - size, pipe);
-		if (bytes_read == 0) break;
-		size += bytes_read;
-
-		if (size == capacity) {
-			capacity *= 2;
-			file_data = (u8 *) realloc(file_data, capacity);
-		}
-	}
-	pclose(pipe);
-
-	Image wl_image = LoadImageFromMemory(".png", file_data, (int)size);
-
-	if (!wl_image.data) {
-		panic("failed to load screenshot data from grim\n");
+		panic("fdopen on grim pipe failed: %s\n", strerror(errno));
 	}
 
 	//
-	// grim might output an image with an alpha channel (RGBA).
-	// Coerce the format so our 3-byte RGB iteration below doesn't fault.
 	//
-	ImageFormat(&wl_image, PIXELFORMAT_UNCOMPRESSED_R8G8B8);
+	// Parse PPM (P6) header: "P6\n<w> <h>\n<maxval>\n" then raw binary RGB
+	//
+	//
 
-	const u32 w = wl_image.width;
-	const u32 h = wl_image.height;
+	int w = 0, h = 0, maxval = 0;
+	if (fscanf(pipe, "P6 %d %d %d", &w, &h, &maxval) != 3) {
+		panic("failed to parse PPM header from grim output\n");
+	}
+
+	fgetc(pipe);  // Consume the single whitespace byte between header and binary data.
+
+	if (w <= 0 || h <= 0) {
+		panic("invalid PPM dimensions from grim (%d x %d)\n", w, h);
+	}
 
 	screen_width  = w;
 	screen_height = h;
 
-	u8 *data = (u8 *) malloc(w * h * sizeof(RGB));
-	u8 *darker_data = (u8 *) malloc(w * h * sizeof(RGB));
-
-	u8 *img_pixels = (u8 *) wl_image.data;
-
-	for (usize y = 0; y < h; y++) {
-		for (usize x = 0; x < w; x++) {
-			const usize idx = (y * w + x) * sizeof(RGB);
-
-			const u8 r = img_pixels[idx + 0];
-			const u8 g = img_pixels[idx + 1];
-			const u8 b = img_pixels[idx + 2];
-
-			data[idx + 0] = r;
-			data[idx + 1] = g;
-			data[idx + 2] = b;
-
-			darker_data[idx + 0] = darken_channel(r);
-			darker_data[idx + 1] = darken_channel(g);
-			darker_data[idx + 2] = darken_channel(b);
-		}
+	const usize plane_size = (usize) w * (usize) h * sizeof(RGB);
+	u8 *data = (u8 *) malloc(plane_size);
+	if (!data) {
+		panic("failed to allocate screenshot buffer\n");
 	}
 
-	UnloadImage(wl_image);
+	usize total_read = 0;
+	while (total_read < plane_size) {
+		usize n = fread(data + total_read, 1, plane_size - total_read, pipe);
+		if (n == 0) break;
+		total_read += n;
+	}
+
+	fclose(pipe);
+
+	int status;
+	waitpid(pid, &status, 0);
+
+	if (total_read != plane_size) {
+		panic("short read from grim: expected %zu bytes, got %zu\n", plane_size, total_read);
+	}
 
 	fill_image(&screenshot,
 						 w, h,
 						 PIXELFORMAT_UNCOMPRESSED_R8G8B8,
 						 data);
+}
+
+static void compute_darker_screenshot(void)
+{
+	const u32 w = screenshot.width;
+	const u32 h = screenshot.height;
+	const usize plane_size = (usize) w * (usize) h * sizeof(RGB);
+
+	u8 *darker_data = (u8 *) malloc(plane_size);
+	if (!darker_data) {
+		panic("failed to allocate darker screenshot buffer\n");
+	}
+
+	const u8 *src = (const u8 *) screenshot.data;
+
+	for (usize i = 0; i < plane_size; i++) {
+		darker_data[i] = darken_channel(src[i]);
+	}
 
 	fill_image(&darker_screenshot,
 						 w, h,
@@ -484,15 +584,8 @@ static void capture_screen(Window root, XWindowAttributes gwa)
 
 	XDestroyImage(ximage);
 
-	fill_image(&screenshot,
-						 w, h,
-						 PIXELFORMAT_UNCOMPRESSED_R8G8B8,
-						 data);
-
-	fill_image(&darker_screenshot,
-						 w, h,
-						 PIXELFORMAT_UNCOMPRESSED_R8G8B8,
-						 darker_data);
+	fill_image(&screenshot,        w, h, PIXELFORMAT_UNCOMPRESSED_R8G8B8, data);
+	fill_image(&darker_screenshot, w, h, PIXELFORMAT_UNCOMPRESSED_R8G8B8, darker_data);
 }
 #endif
 
@@ -566,6 +659,24 @@ INLINE static whxy_t get_selection_data(void)
 	};
 }
 
+INLINE static void init_output_path(void)
+{
+	const char *home = getenv("HOME");
+	if (!home) {
+		panic("could not determine HOME directory (is $HOME set?)\n");
+	}
+
+	char dir_path[PATH_MAX];
+	snprintf(dir_path, sizeof(dir_path), "%s/%s", home, OUTPUT_DIR_NAME);
+
+	if (mkdir(dir_path, 0755) != 0 && errno != EEXIST) {
+		panic("could not create directory `%s`: %s\n", dir_path, strerror(errno));
+	}
+
+	snprintf(output_file_base, sizeof(output_file_base), "%s/%s", dir_path, OUTPUT_FILE_NAME);
+	output_file_name_len = strlen(output_file_base);
+}
+
 #define get_file_path(...) get_file_path_(__VA_ARGS__, 0)
 
 // add _<number> at the end if needed to prevent overwriting
@@ -573,19 +684,26 @@ char *get_file_path_(char *file_path, u64 rec_count)
 {
 	if (access(file_path, F_OK) == 0) {
 		scratch_buffer_clear();
+
 		char *number_start = file_path + output_file_name_len;
 		if (*number_start == '\0') {
-			scratch_buffer_printf("%s_%zu.png", OUTPUT_FILE_NAME, 0);
+			scratch_buffer_printf("%s_%zu.png", output_file_base, 0);
 		} else {
-			//										skip `_`
 			u64 number = strtoull(number_start + 1, NULL, 10);
-			scratch_buffer_printf("%s_%zu.png", OUTPUT_FILE_NAME, number + 1);
+			scratch_buffer_printf("%s_%zu.png", output_file_base, number + 1);
 		}
 
 		return get_file_path_(scratch_buffer_to_string(), rec_count++);
 	}
 
 	return file_path;
+}
+
+static char *initial_output_path(void)
+{
+	scratch_buffer_clear();
+	scratch_buffer_printf("%s%s", output_file_base, OUTPUT_FILE_EXTENSION);
+	return scratch_buffer_to_string();
 }
 
 INLINE static u8 *draw_canvas_into_image(u8 *data, int w, int h)
@@ -624,8 +742,8 @@ INLINE static void flip_vertical_inplace(u8 *data, i32 w, i32 h)
 
 INLINE static void save_fullscreen(void)
 {
-	const char *file_path = get_file_path(OUTPUT_FILE_NAME
-																				OUTPUT_FILE_EXTENSION);
+	const char *file_path = get_file_path(initial_output_path());
+
 	Image image = (Image) {
 		.data = original_image_data,
 		.width = screenshot.width,
@@ -641,8 +759,7 @@ INLINE static void save_fullscreen(void)
 
 INLINE static void save_image_data(u8 *data, int w, int h)
 {
-	const char *file_path = get_file_path(OUTPUT_FILE_NAME
-																				OUTPUT_FILE_EXTENSION);
+	const char *file_path = get_file_path(initial_output_path());
 
 	Image image = (Image) {
 		.data = data,
@@ -702,14 +819,15 @@ INLINE static void get_selection_corners(whxy_t whxy,
 
 static bool selection_check_collisions(Vector2 mouse_pos)
 {
-	const whxy_t whxy = get_selection_data();
+	const whxy_t whxy = get_selection_data(); // image space
 	WHXY_UNPACK
 
-	const Rectangle rec = (Rectangle) {
-		.width = w,
-		.height = h,
-		.x = x,
-		.y = y,
+	const Vector2 top_left = image_to_screen((Vector2) {x, y});
+	const Rectangle rec = {
+		.width = w * zoom,
+		.height = h * zoom,
+		.x = top_left.x,
+		.y = top_left.y,
 	};
 
 	return CheckCollisionPointRec(mouse_pos, rec);
@@ -718,37 +836,19 @@ static bool selection_check_collisions(Vector2 mouse_pos)
 static u8 selection_check_corner_collisions(Vector2 mouse_pos)
 {
 	Vector2 up_l, up_r, bot_l, bot_r = {0};
-	get_selection_corners(get_selection_data(),
-												&up_l, &up_r,
-												&bot_l, &bot_r);
+	get_selection_corners(get_selection_data(), &up_l, &up_r, &bot_l, &bot_r);
 
-	if (CheckCollisionPointCircle(mouse_pos, up_l, RESIZE_RING_RADIUS)) {
-		return SELECTION_UPPER_LEFT;
-	}
+	up_l  = image_to_screen(up_l);
+	up_r  = image_to_screen(up_r);
+	bot_l = image_to_screen(bot_l);
+	bot_r = image_to_screen(bot_r);
 
-	if (CheckCollisionPointCircle(mouse_pos, up_r, RESIZE_RING_RADIUS)) {
-		return SELECTION_UPPER_RIGHT;
-	}
-
-	if (CheckCollisionPointCircle(mouse_pos, bot_l, RESIZE_RING_RADIUS)) {
-		return SELECTION_BOTTOM_LEFT;
-	}
-
-	if (CheckCollisionPointCircle(mouse_pos, bot_r, RESIZE_RING_RADIUS)) {
-		return SELECTION_BOTTOM_RIGHT;
-	}
+	if (CheckCollisionPointCircle(mouse_pos, up_l, RESIZE_RING_RADIUS))  return SELECTION_UPPER_LEFT;
+	if (CheckCollisionPointCircle(mouse_pos, up_r, RESIZE_RING_RADIUS))  return SELECTION_UPPER_RIGHT;
+	if (CheckCollisionPointCircle(mouse_pos, bot_l, RESIZE_RING_RADIUS)) return SELECTION_BOTTOM_LEFT;
+	if (CheckCollisionPointCircle(mouse_pos, bot_r, RESIZE_RING_RADIUS)) return SELECTION_BOTTOM_RIGHT;
 
 	return SELECTION_POISONED;
-}
-
-INLINE static Vector2 Vector2Value(float value)
-{
-	return (Vector2) {value, value};
-}
-
-INLINE static Vector2 Vector2DivideValue(Vector2 v, float div)
-{
-	return (Vector2) { v.x / div, v.y / div };
 }
 
 static void take_screenshot(void)
@@ -757,26 +857,14 @@ static void take_screenshot(void)
 		const whxy_t whxy = get_selection_data();
 		WHXY_UNPACK_I32
 
-		x = fabsf(x - image_pos.x) / zoom;
-		y = fabsf(y - image_pos.y) / zoom;
-		w /= zoom;
-		h /= zoom;
-
-		memcpy(
-			drawn_data_buffer, original_image_data,
-			sizeof(RGB)*screenshot.width*screenshot.height
-		);
+		memcpy(drawn_data_buffer, original_image_data, sizeof(RGB)*screenshot.width*screenshot.height);
 
 		flip_vertical_inplace(drawn_data_buffer, screenshot.width, screenshot.height);
 
 		draw_canvas_into_image(drawn_data_buffer, screenshot.width, screenshot.height);
 		flip_vertical_inplace(drawn_data_buffer, screenshot.width, screenshot.height);
 
-		crop_image(drawn_data_buffer,
-							 screenshot.width,
-							 screenshot.height,
-							 w, h, x, y,
-							 crop_data_buffer);
+		crop_image(drawn_data_buffer, screenshot.width, screenshot.height, w, h, x, y, crop_data_buffer);
 
 		stop_selection_mode();
 		save_image_data(crop_data_buffer, w, h);
@@ -816,23 +904,26 @@ static bool handle_input(void)
 		cur_pos = mouse_pos;
 	}
 
+	if (selection_mode && !resize_mode) {
+    selection_end = screen_to_image(cur_pos);
+	}
+
 	alt_mode = IsKeyDown(KEY_LEFT_ALT);
 
 	if (color_selector_mode) {
 		ShowCursor();
 		SetMouseCursor(MOUSE_CURSOR_ARROW);
+
 	} else if (resizing_now) {
 		ShowCursor();
 		SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+
 	} else if (alt_mode || resize_mode || drawing_now) {
 		ShowCursor();
 		SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
+
 	} else {
 		HideCursor();
-	}
-
-	if (selection_mode && !resize_mode) {
-		selection_end = cur_pos;
 	}
 
 	// Wait quarter of a second to not draw accidentally
@@ -854,31 +945,27 @@ static bool handle_input(void)
 			} break;
 
 			case SELECTION_UPPER_LEFT: {
-				if (mouse_pos.x > 0) {
-					selection_start.x = mouse_pos.x;
-				}
-				selection_start.y = mouse_pos.y;
+				const Vector2 p = screen_to_image(mouse_pos);
+				selection_start.x = fminf(p.x, selection_end.x - MIN_SELECTION_SIZE);
+				selection_start.y = fminf(p.y, selection_end.y - MIN_SELECTION_SIZE);
 			} break;
 
 			case SELECTION_UPPER_RIGHT: {
-				if (mouse_pos.x > 0) {
-					selection_end.x = mouse_pos.x;
-				}
-				selection_start.y = mouse_pos.y;
+				const Vector2 p = screen_to_image(mouse_pos);
+				selection_end.x   = fmaxf(p.x, selection_start.x + MIN_SELECTION_SIZE);
+				selection_start.y = fminf(p.y, selection_end.y - MIN_SELECTION_SIZE);
 			} break;
 
 			case SELECTION_BOTTOM_LEFT: {
-				if (mouse_pos.x > 0) {
-					selection_start.x = mouse_pos.x;
-				}
-				selection_end.y = mouse_pos.y;
+				const Vector2 p = screen_to_image(mouse_pos);
+				selection_start.x = fminf(p.x, selection_end.x - MIN_SELECTION_SIZE);
+				selection_end.y   = fmaxf(p.y, selection_start.y + MIN_SELECTION_SIZE);
 			} break;
 
 			case SELECTION_BOTTOM_RIGHT: {
-				if (mouse_pos.x > 0) {
-					selection_end.x = mouse_pos.x;
-				}
-				selection_end.y = mouse_pos.y;
+				const Vector2 p = screen_to_image(mouse_pos);
+				selection_end.x = fmaxf(p.x, selection_start.x + MIN_SELECTION_SIZE);
+				selection_end.y = fmaxf(p.y, selection_start.y + MIN_SELECTION_SIZE);
 			} break;
 
 			default: panic("unreachable"); break;
@@ -899,36 +986,47 @@ static bool handle_input(void)
 		}
 	}
 
-	if (!color_selector_mode && !pan_mode && !alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
+	if (suppress_draw_until_release) {
+		if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+		    suppress_draw_until_release = false;
+		}
+
+	} else if (!color_selector_mode && !pan_mode && !alt_mode && (!resize_mode || (resize_mode && !resizing_now))) {
 		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 			drawing_now = true;
+
+			const Vector2 img_start = screen_to_image(dmouse_pos);
+			const Vector2 img_end   = screen_to_image(mouse_pos);
+
 			BeginTextureMode(canvas);
 			{
-				const int nsteps = (int) Vector2Distance(dmouse_pos, mouse_pos);
-				for (int step = 0; step < nsteps; step++) {
-					const Vector2 ipos = Vector2Lerp(dmouse_pos,
-																					 mouse_pos,
-																					 (float) step / nsteps);
+        const int nsteps = MAX(1, (int) Vector2Distance(img_start, img_end));
 
+				for (int step = 0; step < nsteps; step++) {
+					const Vector2 ipos = Vector2Lerp(img_start, img_end, (float) step / nsteps);
 					DrawCircle((int) ipos.x, (int) ipos.y, brush_radius, brush_color);
 				}
 			}
 			EndTextureMode();
+
 		} else if (drawing_now) {
 			drawing_now = false;
 		}
 	}
 
-	if (IsKeyPressed(KEY_ESCAPE)) {
+	if (IsKeyPressed(KEY_C)) {
 		stop_timer_mode();
 		if (color_selector_mode) {
 			stop_color_selector_mode();
+
 		} else if (selection_mode) {
 			stop_resizing();
 			stop_selection_mode();
+
 		} else {
 			clear_canvas();
 			zoom = STARTING_ZOOM;
+			target_zoom = STARTING_ZOOM;
 			radius = STARTING_RADIUS;
 			image_pos = Vector2Zero();
 			SetMousePosition(center_x, center_y);
@@ -939,10 +1037,6 @@ static bool handle_input(void)
 	else if (IsKeyPressed(KEY_ENTER)) {
 		take_screenshot();
 		return true;
-	}
-
-	else if (IsKeyPressed(KEY_C)) {
-		clear_canvas();
 	}
 
 	else if (IsKeyPressed(KEY_T)) {
@@ -976,6 +1070,7 @@ static bool handle_input(void)
 
 			const float new_brush_radius = brush_radius + wheel_move*sens;
 			brush_radius = Clamp(new_brush_radius, 1.0f, 50.0f);
+
 		} else if (IsKeyDown(KEY_CAPS_LOCK) || IsKeyDown(KEY_LEFT_CONTROL)) {
 			float offset = -SCROLL_SPEED*wheel_move;
 
@@ -990,16 +1085,20 @@ static bool handle_input(void)
 
 			const float tradius = MIN(MIN(screen_width, screen_height), MAX(15.0, radius + sine*sens));
 			radius += (tradius - radius)*SMOOTHING_FACTOR;
+
 		} else {
-			Vector2 offset = Vector2DivideValue(Vector2Subtract(mouse_pos, image_pos), zoom);
-
-			const float zs = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_ZOOM_SPEED : ZOOM_SPEED;
-			zoom += wheel_move*0.1f*zs;
-			zoom = Clamp(zoom, MIN_ZOOM, MAX_ZOOM);
-
-			image_pos = Vector2Subtract(mouse_pos,
-																	Vector2Multiply(offset, Vector2Value(zoom)));
+      const float step = IsKeyDown(KEY_LEFT_SHIFT) ? BOOSTED_ZOOM_STEP : ZOOM_STEP;
+      target_zoom *= powf(step, wheel_move);
+      target_zoom = Clamp(target_zoom, MIN_ZOOM, MAX_ZOOM);
 		}
+	}
+
+	if (fabsf(zoom - target_zoom) > 0.0005f) {
+		const Vector2 anchor = screen_to_image(mouse_pos);
+		zoom = Lerp(zoom, target_zoom, ZOOM_SMOOTHING_FACTOR);
+		image_pos = Vector2Subtract(mouse_pos, Vector2Multiply(anchor, Vector2Value(zoom)));
+	} else {
+		zoom = target_zoom;
 	}
 
 	if (IsKeyDown(KEY_SPACE)) {
@@ -1009,23 +1108,41 @@ static bool handle_input(void)
 
 		if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
 			Vector2 delta = Vector2Subtract(mouse_pos, dmouse_pos);
-			delta = Vector2Scale(delta, PANNING_FACTOR*(zoom*PANNING_ZOOM_FACTOR));
+			const float pan_scale = PANNING_FACTOR * powf(zoom, PAN_ZOOM_EXPONENT);
+			delta = Vector2Scale(delta, pan_scale);
 			image_pos = Vector2Add(image_pos, delta);
 		}
 
 		cur_pos = mouse_pos;
+
 	} else {
+		if (pan_mode && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+			suppress_draw_until_release = true;
+		}
+
 		pan_mode = false;
 	}
 
 	if (alt_mode) {
 		if (!selection_mode && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
-			selection_start = mouse_pos;
+      selection_start = screen_to_image(mouse_pos);
+			selection_end = selection_start;
 			selection_mode = true;
+
 		} else if (selection_mode && !IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+			// Snap start->top-left, end->bottom-right so the corner
+			// switch below (which assumes that layout) is always correct,
+			// regardless of which direction the box was originally dragged.
+			const whxy_t whxy = get_selection_data();
+			selection_start = (Vector2) { whxy.x, whxy.y };
+			selection_end   = (Vector2) { whxy.x + whxy.w, whxy.y + whxy.h };
 			resize_mode = true;
 		}
+
 	} else if (selection_mode && !resize_mode) {
+		// Alt released and no corner is actively being dragged — exit
+		// the tool entirely so the cursor/mode snaps back to painting.
+		stop_resizing();
 		stop_selection_mode();
 	}
 
@@ -1037,66 +1154,55 @@ static bool handle_input(void)
 static void draw_selection(void)
 {
 	if (selection_start.x == DOUBLE_UNINITIALIZED) return;
-	DrawTextureEx(darker_screenshot_texture,
-								image_pos,
-								0,
-								zoom,
-								WHITE);
+	DrawTextureEx(darker_screenshot_texture, image_pos, 0, zoom, WHITE);
 
-	const whxy_t whxy = get_selection_data();
+	const whxy_t whxy = get_selection_data(); // image space
+
+	if (whxy.w < SELECTION_DRAG_THRESHOLD && whxy.h < SELECTION_DRAG_THRESHOLD) {
+		return; // just a click so far, nothing to reveal/resize yet
+	}
+
 	WHXY_UNPACK
 
+	const Rectangle src_rect = { x, y, w, h }; // already matches texture pixels 1:1, no conversion needed
+
+	const Vector2 screen_top_left = image_to_screen((Vector2) {x, y});
 	const Rectangle selection = {
-		.height = h,
-		.width = w,
-		.x = x,
-		.y = y
+		.x = screen_top_left.x, .y = screen_top_left.y,
+		.width = w * zoom, .height = h * zoom
 	};
 
-	const Rectangle src_rect = {
-		.x = (x - image_pos.x) / zoom,
-		.y = (y - image_pos.y) / zoom,
-		.width = w / zoom,
-		.height = h / zoom
-	};
+	DrawTexturePro(screenshot_texture, src_rect, selection, Vector2Zero(), 0, WHITE);
 
-	DrawTexturePro(screenshot_texture,
-								 src_rect,
-								 selection,
-								 Vector2Zero(),
-								 0,
-								 WHITE);
+	Vector2 corners[SELECTION_CORNER_COUNT];
+	get_selection_corners(whxy, &corners[SELECTION_UPPER_LEFT],  &corners[SELECTION_UPPER_RIGHT],
+                              &corners[SELECTION_BOTTOM_LEFT], &corners[SELECTION_BOTTOM_RIGHT]);
 
-	Vector2 up_l, up_r, bot_l, bot_r = {0};
-	get_selection_corners(whxy, &up_l, &up_r, &bot_l, &bot_r);
 
-	DrawRing(up_l,
-					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
-					 RESIZE_RING_RADIUS,
-					 0.0f, 365.0f,
-					 RESIZE_RING_SEGMENTS,
-					 RESIZE_RING_COLOR);
+	const Vector2 mouse_pos      = GetMousePosition();
+	const bool    mouse_down     = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+	const float   dt             = GetFrameTime();
+	const u8      hovered_corner = selection_check_corner_collisions(mouse_pos);
 
-	DrawRing(up_r,
-					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
-					 RESIZE_RING_RADIUS,
-					 0.0f, 365.0f,
-					 RESIZE_RING_SEGMENTS,
-					 RESIZE_RING_COLOR);
+	for (int i = 0; i < SELECTION_CORNER_COUNT; i++) {
+		corners[i] = image_to_screen(corners[i]);
 
-	DrawRing(bot_l,
-					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
-					 RESIZE_RING_RADIUS,
-					 0.0f, 365.0f,
-					 RESIZE_RING_SEGMENTS,
-					 RESIZE_RING_COLOR);
+		const bool is_hovered = (hovered_corner == i);
+		const float target    = is_hovered ? 1.0f : 0.0f;
+		corner_fill[i] = ease_towards(corner_fill[i], target, RESIZE_RING_ANIM_SPEED, dt);
 
-	DrawRing(bot_r,
-					 RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
-					 RESIZE_RING_RADIUS,
-					 0.0f, 365.0f,
-					 RESIZE_RING_SEGMENTS,
-					 RESIZE_RING_COLOR);
+		// always-visible outline
+		DrawRing(corners[i], RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS, RESIZE_RING_RADIUS,
+		         0.0f, 365.0f, RESIZE_RING_SEGMENTS, RESIZE_RING_COLOR);
+
+		// filling pie-slice, growing with corner_fill[i]; swaps color while actively dragging
+		if (corner_fill[i] > 0.01f) {
+			const Color fill_color = (is_hovered && mouse_down) ? RESIZE_RING_PRESSED_COLOR
+			                                                     : RESIZE_RING_HOVER_COLOR;
+			DrawCircleSector(corners[i], RESIZE_RING_RADIUS - RESIZE_RING_THICKNESS,
+			                  0.0f, 360.0f * corner_fill[i], RESIZE_RING_SEGMENTS, fill_color);
+		}
+	}
 }
 
 static void draw_canvas(void)
@@ -1108,9 +1214,9 @@ static void draw_canvas(void)
 	};
 
 	Rectangle dst_rec = {
-		0, 0,
-		(float) GetScreenWidth(),
-		(float) GetScreenHeight()
+		image_pos.x, image_pos.y,
+		(float) canvas.texture.width * zoom,
+		(float) canvas.texture.height * zoom
 	};
 
 	Vector2 origin = {0};
@@ -1135,27 +1241,16 @@ static void handle_timer_mode(void)
 	char *text = scratch_buffer_to_string();
 
 	const float spacing = 2.0f;
-	const float font_size = 20.0f;
 
-	const Vector2 size = MeasureTextEx(font, text, font_size, spacing);
+	const Vector2 size = MeasureTextEx(font, text, FONT_SIZE, spacing);
 
 	const float x = GetScreenWidth()*0.97 - size.x;
 	const float y = GetScreenHeight()*0.97 - size.y;
 
 	const float pad = 50.0f;
 
-	DrawRectangle(x - pad/2,
-								y - pad/2,
-								size.x + pad,
-								size.y + pad,
-								(Color){0, 0, 0, 150});
-
-	DrawTextEx(font,
-						 text,
-						 (Vector2) {x, y},
-						 font_size,
-						 spacing,
-						 WHITE);
+	DrawRectangle(x - pad/2, y - pad/2, size.x + pad, size.y + pad, (Color){0, 0, 0, 150});
+	DrawTextEx(font, text, (Vector2) {x, y}, FONT_SIZE, spacing, WHITE);
 }
 
 static void handle_color_selector_mode(void)
@@ -1327,7 +1422,9 @@ i32 main(int argc_, char **argv_)
 #endif
 
 	cur_pos = (Vector2) {center_x, center_y};
-	output_file_name_len = strlen(OUTPUT_FILE_NAME);
+	init_output_path();
+
+	TIMESTAMP("start");
 
 #ifndef WAYLAND
 	capture_screen(root, gwa);
@@ -1335,12 +1432,20 @@ i32 main(int argc_, char **argv_)
 	capture_screen();
 #endif
 
+	TIMESTAMP("after capture_screen");
+
 	preserve_original_image_data();
+
+	TIMESTAMP("after preserve_original_image_data");
 
 	if (immediate_screenshot_and_exit) {
 		save_fullscreen();
 		exit(0);
 	}
+
+#ifdef WAYLAND
+	compute_darker_screenshot();
+#endif
 
 	const usize max_crop_w = (usize) (screenshot.width  / MIN_ZOOM) + 1;
 	const usize max_crop_h = (usize) (screenshot.height / MIN_ZOOM) + 1;
@@ -1355,11 +1460,23 @@ i32 main(int argc_, char **argv_)
 
 	init_raylib();
 
-	canvas = LoadRenderTexture(screen_width, screen_height);
+	TIMESTAMP("after init_raylib");
+
+	canvas = LoadRenderTexture(screenshot.width, screenshot.height);
+	TIMESTAMP("after LoadTextureFromImage");
 	clear_canvas();
 
+	TIMESTAMP("after canvas setup");
+
 	screenshot_texture = LoadTextureFromImage(screenshot);
+	SetTextureFilter(screenshot_texture, TEXTURE_FILTER_BILINEAR);
+
 	darker_screenshot_texture = LoadTextureFromImage(darker_screenshot);
+	SetTextureFilter(darker_screenshot_texture, TEXTURE_FILTER_BILINEAR);
+
+	TIMESTAMP("after SetTextureFilters");
+
+	cur_pos = GetMousePosition();
 
 	while (!WindowShouldClose()) {
 		if (handle_input()) break;
@@ -1369,26 +1486,30 @@ i32 main(int argc_, char **argv_)
 			ClearBackground(BACKGROUND_COLOR);
 			if (selection_mode) {
 				draw_selection();
-			} else if (alt_mode || drawing_now || color_selector_mode) {
-				DrawTextureEx(screenshot_texture,
-											image_pos,
-											0,
-											zoom,
-											WHITE);
+
+			} else if (drawing_now || color_selector_mode) {
+				DrawTextureEx(screenshot_texture, image_pos, 0, zoom, WHITE);
 
 			} else {
 				DrawTextureEx(darker_screenshot_texture, image_pos, 0, zoom, WHITE);
 
 				// Translate screen coordinates
-				Vector2 texture_center = {
-					(cur_pos.x - image_pos.x) / zoom,
-					(cur_pos.y - image_pos.y) / zoom
-				};
+				Vector2 texture_center = screen_to_image(cur_pos);
 
 				// Scale the radius so it visually stays the same size
 				float scaled_radius = radius / zoom;
 
 				DrawCollisionTextureCircle(screenshot_texture, image_pos, texture_center, scaled_radius, WHITE);
+
+				if (pan_mode) {
+					const char *label = "M";
+					const float spacing = 2.0f;
+					const Vector2 size = MeasureTextEx(font, label, FONT_SIZE, spacing);
+					const Vector2 pos = { cur_pos.x - size.x/2.0f, cur_pos.y - size.y/2.0f };
+
+					DrawTextEx(font, label, (Vector2){pos.x + 1, pos.y + 1}, FONT_SIZE, spacing, BLACK); // cheap shadow for legibility
+					DrawTextEx(font, label, pos, FONT_SIZE, spacing, WHITE);
+				}
 			}
 
 			draw_canvas();
