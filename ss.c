@@ -16,6 +16,9 @@
 #include <raylib.h>
 #include <raymath.h>
 
+#define DEBUG 0
+#define WAYLAND
+
 #ifndef WAYLAND
 #define Font XFont
 #include <X11/Xlib.h>
@@ -31,10 +34,7 @@
 
 extern char **environ;
 
-#define DEBUG 0
-#define WAYLAND
-
-#ifdef DEBUG
+#if DEBUG != 0
 #define TIMESTAMP(label) do { \
 	struct timespec _ts; \
 	clock_gettime(CLOCK_REALTIME, &_ts); \
