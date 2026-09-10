@@ -123,7 +123,7 @@ extern char **environ;
 
 static float corner_fill[SELECTION_CORNER_COUNT] = {0}; // animated 0..1 per corner
 
-static inline float ease_towards(float current, float target, float speed, float dt)
+static INLINE float ease_towards(float current, float target, float speed, float dt)
 {
 	return current + (target - current) * (1.0f - expf(-speed * dt));
 }
